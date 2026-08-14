@@ -264,6 +264,57 @@ def test_max_total_is_not_decided_per_action_here():
 # --------------------------------------------------------------------------
 
 
+def test_policy_hash_defaults_to_unbound_and_is_backward_compatible():
+    token = mint(KEY, demo_root())
+    assert token.policy_hash == ""
+    assert verify(KEY, token)
+
+
+def test_binding_to_a_policy_hash_is_part_of_the_mac():
+    """Two structurally-identical root scopes minted under different policies
+    must not verify interchangeably (the gap this field closes)."""
+    root = demo_root()
+    bound_a = mint(KEY, root, policy_hash="policy-a")
+    bound_b = mint(KEY, root, policy_hash="policy-b")
+    assert bound_a.tag != bound_b.tag
+    assert verify(KEY, bound_a, expected_policy_hash="policy-a")
+    assert not verify(KEY, bound_a, expected_policy_hash="policy-b")
+    assert not verify(KEY, bound_b, expected_policy_hash="policy-a")
+
+
+def test_tampering_with_policy_hash_breaks_verification():
+    """policy_hash rides inside the MAC input, so editing it post-mint is
+    indistinguishable from any other forgery attempt."""
+    token = mint(KEY, demo_root(), policy_hash="policy-a")
+    from dataclasses import replace
+
+    tampered = replace(token, policy_hash="policy-b")
+    assert not verify(KEY, tampered)
+
+
+def test_expected_policy_hash_is_optional():
+    token = mint(KEY, demo_root(), policy_hash="policy-a")
+    # Omitting expected_policy_hash still verifies the MAC alone.
+    assert verify(KEY, token)
+
+
+def test_attenuate_propagates_policy_hash_to_the_child():
+    """Regression: attenuate() must carry policy_hash forward unchanged, or a
+    legitimately attenuated child of a bound token fails to verify (the
+    already-computed parent tag was built assuming this value)."""
+    token = mint(KEY, demo_root(), policy_hash="policy-a")
+    child = attenuate(token, Scope(max_amount=100))
+    assert child.policy_hash == "policy-a"
+    assert verify(KEY, child, expected_policy_hash="policy-a")
+
+
+def test_token_id_changes_with_policy_hash():
+    root = demo_root()
+    a = mint(KEY, root, policy_hash="policy-a")
+    b = mint(KEY, root, policy_hash="policy-b")
+    assert a.token_id() != b.token_id()
+
+
 def test_a_minted_token_verifies_and_a_foreign_key_does_not():
     token = mint(KEY, demo_root())
     assert verify(KEY, token)

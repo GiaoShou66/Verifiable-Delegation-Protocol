@@ -223,6 +223,27 @@ def test_a_log_opened_under_another_policy_is_refused(tmp_path, phi):
         AgentShim(Monitor(phi), TOOLS, log, ROOT_KEY)
 
 
+def test_a_token_bound_to_a_different_policy_is_refused(tmp_path, phi):
+    other = parse("counter spend over {pay}\nalways(spend <= 1)")
+    log = AuditLog(tmp_path / "a.jsonl", phi.digest(), LOG_KEY)
+    shim = AgentShim(Monitor(phi), TOOLS, log, ROOT_KEY)
+    wrong_token = mint(ROOT_KEY, Scope.root_from_policy(phi), policy_hash=other.digest())
+    outcome = shim.call(
+        "pay_bill", {"recipient": "alice_utility", "cents": 100}, wrong_token
+    )
+    assert not outcome.allowed
+    assert outcome.gate == "token"
+    assert "different policy artifact" in outcome.reason
+
+
+def test_an_unbound_token_still_works_through_the_shim(tmp_path, phi, token):
+    """token fixture uses mint() without policy_hash -- backward compatible."""
+    log = AuditLog(tmp_path / "a.jsonl", phi.digest(), LOG_KEY)
+    shim = AgentShim(Monitor(phi), TOOLS, log, ROOT_KEY, executor=lambda n, a: "ok")
+    outcome = shim.call(
+        "pay_bill", {"recipient": "alice_utility", "cents": 100}, token
+    )
+    assert outcome.allowed
 def test_artifact_hash_binds_policy_hash_to_the_exact_tool_table(tmp_path, phi):
     """DESIGN.md 1.1: the mapping table decides what an amount MEANS, so its
     integrity matters as much as phi's. artifact_hash makes that checkable."""

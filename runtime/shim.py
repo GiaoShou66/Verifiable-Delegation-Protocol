@@ -398,6 +398,15 @@ class AgentShim:
             return f"no capability token presented (got {type(token).__name__})"
         if not verify(self._root_key, token):
             return "token does not verify against the root key"
+        # Opt-in binding (tokens/macaroon.py Token.policy_hash): a token
+        # minted with "" (the mint() default -- unbound) skips this check
+        # entirely, so older callers are unaffected. A token minted WITH a
+        # policy_hash is refused here if it does not match this shim's own
+        # monitor, even though its MAC already verified above -- MAC
+        # integrity proves the field was not tampered with, not that it is
+        # the policy THIS shim enforces.
+        if token.policy_hash and token.policy_hash != self._monitor.policy.digest():
+            return "token was minted for a different policy artifact"
         if not token.root.names_capabilities:
             return (
                 "token's root scope leaves verbs or targets unrestricted; a root "

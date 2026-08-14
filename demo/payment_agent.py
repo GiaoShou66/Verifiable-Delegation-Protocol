@@ -43,7 +43,7 @@ from policy.ast import Policy
 from policy.compile import compile_intent
 from policy.confirm import CONFIRM_PHRASE, request_confirmation
 from runtime.auditlog import AuditLog
-from runtime.shim import AgentShim, ToolSpec
+from runtime.shim import AgentShim, ToolSpec, artifact_hash
 from tokens.macaroon import Token, mint
 from tokens.scope import Scope
 
@@ -173,13 +173,25 @@ def authorize(
         ledger[recipient] = ledger.get(recipient, 0) + cents
         return f"paid {recipient} {cents} cents"
 
-    shim = AgentShim(monitor, TOOLS, log, ROOT_KEY, executor=executor)
-    token = mint(ROOT_KEY, Scope.root_from_policy(policy))
+    # Bind the shim to the EXACT tool table shown at confirmation (SPEC.md
+    # section 1.1) -- an integrator who wires up a different table (e.g. a
+    # typo'd amount_arg that silently changes what "amount" means) is refused
+    # here rather than authorized under the wrong meaning.
+    expected = artifact_hash(policy.digest(), TOOLS)
+    shim = AgentShim(
+        monitor, TOOLS, log, ROOT_KEY, executor=executor,
+        expected_artifact_hash=expected,
+    )
+    # Bind the root token to THIS policy artifact (SPEC.md section 5.1a), not
+    # just to a root key: two policies can share an identical root scope, and
+    # an unbound token would verify under either.
+    token = mint(ROOT_KEY, Scope.root_from_policy(policy), policy_hash=policy.digest())
 
     writer("\nAUTHORIZED.")
-    writer(f"  policy_hash: {policy.digest()}")
-    writer(f"  root token:  {token.token_id()[:16]}...")
-    writer(f"  scope:       {token.scope.describe()}")
+    writer(f"  policy_hash:   {policy.digest()}")
+    writer(f"  artifact_hash: {shim.artifact_hash}")
+    writer(f"  root token:    {token.token_id()[:16]}...")
+    writer(f"  scope:         {token.scope.describe()}")
     return Session(
         policy=policy, monitor=monitor, shim=shim, token=token, log=log, ledger=ledger
     )

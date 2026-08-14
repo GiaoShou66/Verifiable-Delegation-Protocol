@@ -86,6 +86,16 @@ class Token:
     root: Scope
     caveats: tuple[Scope, ...]
     tag: bytes
+    #: Which policy artifact this ROOT token was minted under. "" (default)
+    #: means unbound -- two structurally-identical root scopes minted under
+    #: DIFFERENT policies (same V-minus-prohibited, same T, same c_max; see
+    #: `Scope.root_from_policy`) would otherwise verify interchangeably under
+    #: a shared root key, even though each claims authority tied to no
+    #: particular phi. Binding is opt-in at `mint()`; once present it is part
+    #: of the MAC input (see `_mac` calls below), so it cannot be edited
+    #: without invalidating the tag -- same protection `token_id` gets from
+    #: the chain, extended to cover which policy this token means.
+    policy_hash: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.root, Scope):
@@ -98,6 +108,10 @@ class Token:
         if not isinstance(self.tag, (bytes, bytearray)):
             raise TokenError(f"tag must be bytes, got {type(self.tag).__name__}")
         object.__setattr__(self, "tag", bytes(self.tag))
+        if not isinstance(self.policy_hash, str):
+            raise TokenError(
+                f"policy_hash must be a string, got {type(self.policy_hash).__name__}"
+            )
 
     @property
     def scope(self) -> Scope:
@@ -119,12 +133,14 @@ class Token:
     def token_id(self) -> str:
         """Stable identifier for the SCOPE CHAIN, for the audit log.
 
-        SHA-256 over the canonical root and caveats. The tag is deliberately not
-        included: the id goes into a log a third party may read, and it must not
-        carry any part of a secret-keyed value.
+        SHA-256 over the canonical root, its policy_hash binding, and the
+        caveats. The tag is deliberately not included: the id goes into a log
+        a third party may read, and it must not carry any part of a
+        secret-keyed value.
         """
         digest = hashlib.sha256()
         digest.update(_ROOT_DOMAIN)
+        digest.update(self.policy_hash.encode("utf-8"))
         digest.update(self.root.canonical())
         for caveat in self.caveats:
             digest.update(_CAVEAT_DOMAIN)
@@ -136,6 +152,7 @@ class Token:
             "root": self.root.to_obj(),
             "caveats": [caveat.to_obj() for caveat in self.caveats],
             "tag": self.tag.hex(),
+            "policy_hash": self.policy_hash,
         }
 
     @staticmethod
@@ -148,10 +165,10 @@ class Token:
         """
         if not isinstance(obj, dict):
             raise TokenError(f"token must be an object, got {type(obj).__name__}")
-        extra = set(obj) - {"root", "caveats", "tag"}
+        extra = set(obj) - {"root", "caveats", "tag", "policy_hash"}
         if extra:
             raise TokenError(f"token has unknown key(s) {sorted(extra)}")
-        missing = {"root", "caveats", "tag"} - set(obj)
+        missing = {"root", "caveats", "tag", "policy_hash"} - set(obj)
         if missing:
             raise TokenError(f"token is missing key(s) {sorted(missing)}")
 
@@ -165,13 +182,18 @@ class Token:
             tag = bytes.fromhex(tag_hex)
         except ValueError as exc:
             raise TokenError(f"tag is not valid hex: {exc}") from exc
+        policy_hash = obj["policy_hash"]
+        if not isinstance(policy_hash, str):
+            raise TokenError(
+                f"policy_hash must be a string, got {type(policy_hash).__name__}"
+            )
 
         try:
             root = Scope.from_obj(obj["root"])
             caveats = tuple(Scope.from_obj(c) for c in caveats_obj)
         except ScopeError as exc:
             raise TokenError(str(exc)) from exc
-        return Token(root=root, caveats=caveats, tag=tag)
+        return Token(root=root, caveats=caveats, tag=tag, policy_hash=policy_hash)
 
     def serialize(self) -> bytes:
         """Canonical JSON transport form. Deterministic for a given token."""
@@ -197,18 +219,31 @@ class Token:
         return Token.from_obj(parsed)
 
 
-def mint(key: bytes, root: Scope) -> Token:
+def mint(key: bytes, root: Scope, policy_hash: str = "") -> Token:
     """Issue a root token. The ONLY function here that needs `k`.
 
     Called by the issuer after the human confirmation gate, never by an agent.
+
+    `policy_hash`: optional. "" (default) mints an unbound token, exactly as
+    before this parameter existed. Passing `policy.digest()` binds this root
+    token's tag to that specific policy artifact (Token.policy_hash), closing
+    the gap where two structurally-identical root scopes minted under
+    different policies would otherwise verify interchangeably.
     """
     key_bytes = _check_key(key)
     if not isinstance(root, Scope):
         raise TokenError(f"root must be a Scope, got {type(root).__name__}")
+    if not isinstance(policy_hash, str):
+        raise TokenError(
+            f"policy_hash must be a string, got {type(policy_hash).__name__}"
+        )
     return Token(
         root=root,
         caveats=(),
-        tag=_mac(key_bytes, _ROOT_DOMAIN, root.canonical()),
+        tag=_mac(
+            key_bytes, _ROOT_DOMAIN, policy_hash.encode("utf-8") + root.canonical()
+        ),
+        policy_hash=policy_hash,
     )
 
 
@@ -218,6 +253,12 @@ def attenuate(token: Token, caveat: Scope) -> Token:
     The child's effective scope is `token.scope meet caveat`, which is below the
     parent's for EVERY caveat, hostile ones included. There is no argument to
     this function that can widen anything -- see `tokens/scope.py`.
+
+    `policy_hash` MUST carry over from the parent unchanged: it is part of
+    the root's identity (section 5.1a), not a per-caveat concern, and the
+    already-computed `token.tag` was built assuming exactly this value --
+    defaulting it to "" here would silently break verification for every
+    legitimately attenuated child of a bound token.
     """
     if not isinstance(token, Token):
         raise TokenError(f"expected a Token, got {type(token).__name__}")
@@ -227,10 +268,11 @@ def attenuate(token: Token, caveat: Scope) -> Token:
         root=token.root,
         caveats=token.caveats + (caveat,),
         tag=_mac(token.tag, _CAVEAT_DOMAIN, caveat.canonical()),
+        policy_hash=token.policy_hash,
     )
 
 
-def verify(key: bytes, token: object) -> bool:
+def verify(key: bytes, token: object, expected_policy_hash: str | None = None) -> bool:
     """Recompute the chain and compare in constant time.
 
     Returns a BOOL and does not raise for a token object that is merely wrong: a
@@ -240,11 +282,25 @@ def verify(key: bytes, token: object) -> bool:
 
     UNFORGEABILITY IS CONDITIONAL on the HMAC-SHA256 assumption and on `k`
     staying secret. This function does not and cannot establish more than that.
+
+    `expected_policy_hash`: optional. If given, verification also fails
+    unless `token.policy_hash == expected_policy_hash` -- e.g. a shim passing
+    its own monitor's `policy.digest()` here refuses a token minted for a
+    DIFFERENT policy even if that policy happens to produce an identical root
+    scope. MAC integrity alone (the check above) proves policy_hash was not
+    tampered with in transit; it does not by itself assert WHICH policy_hash
+    a verifier requires -- this parameter is how a caller states that.
     """
     key_bytes = _check_key(key)
     if not isinstance(token, Token):
         return False
-    expected = _mac(key_bytes, _ROOT_DOMAIN, token.root.canonical())
+    if expected_policy_hash is not None and token.policy_hash != expected_policy_hash:
+        return False
+    expected = _mac(
+        key_bytes,
+        _ROOT_DOMAIN,
+        token.policy_hash.encode("utf-8") + token.root.canonical(),
+    )
     for caveat in token.caveats:
         expected = _mac(expected, _CAVEAT_DOMAIN, caveat.canonical())
     return hmac.compare_digest(expected, token.tag)
