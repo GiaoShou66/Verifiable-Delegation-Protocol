@@ -114,6 +114,25 @@ BAD = _Bad()
 State = Union[tuple[int, ...], _Bad]
 
 
+@dataclass(frozen=True, slots=True)
+class _CounterLayout:
+    """Where one declared counter's value(s) live in the flat state tuple.
+
+    `slots` is an `int` (the single flat index) when `per_target` is False,
+    or a `Mapping[str, int]` (target -> flat index, covering every target in
+    T) when True. By the time `delta` reads this, `symbol.target` is already
+    known to be a member of T (the sink check ran first), so a per-target
+    lookup can never miss.
+    """
+
+    name: str
+    verbs: frozenset[str]
+    counting: bool
+    per_target: bool
+    bound: int
+    slots: object  # int | Mapping[str, int]
+
+
 class Automaton:
     """A_phi for a fixed policy. Constructed once; never mutated.
 
@@ -123,20 +142,54 @@ class Automaton:
     See DESIGN.md section 7.5 for the honest statement of that limitation.
     """
 
-    __slots__ = ("_policy", "_counter_names", "_counter_verbs", "_bounds", "_q0")
+    __slots__ = ("_policy", "_layouts", "_state_len", "_q0")
 
     def __init__(self, policy: Policy) -> None:
         if not isinstance(policy, Policy):
             raise TypeError(f"expected a Policy, got {type(policy).__name__}")
         self._policy = policy
-        self._counter_names = tuple(d.name for d in policy.counters)
-        self._counter_verbs = tuple(d.verbs for d in policy.counters)
-        # The AST guarantees every declared counter has exactly one cap, so this
-        # lookup cannot be None. If that ever changes, Q would be unbounded.
-        self._bounds = tuple(
-            policy.cap_for(d.name).bound for d in policy.counters  # type: ignore[union-attr]
-        )
-        self._q0: tuple[int, ...] = tuple(0 for _ in policy.counters)
+
+        # State layout: each counter occupies one flat slot (amount-summing or
+        # call-counting, global) or |T| flat slots, one per target in T
+        # (per_target=True -- SPEC.md 2.1b). T is finite (section 1.2), so
+        # this widens the state vector by a known, finite factor; it does not
+        # make Q infinite. Slots are allocated once, at construction, in
+        # policy.counters order -- delta never grows or reshapes this layout.
+        targets = sorted(policy.targets)
+        layouts: list[_CounterLayout] = []
+        cursor = 0
+        for decl in policy.counters:
+            cap = policy.cap_for(decl.name)  # AST guarantees exactly one cap
+            bound = cap.bound  # type: ignore[union-attr]
+            if decl.per_target:
+                slot_map = {t: cursor + i for i, t in enumerate(targets)}
+                cursor += len(targets)
+                layouts.append(
+                    _CounterLayout(
+                        name=decl.name,
+                        verbs=decl.verbs,
+                        counting=decl.counting,
+                        per_target=True,
+                        bound=bound,
+                        slots=slot_map,
+                    )
+                )
+            else:
+                layouts.append(
+                    _CounterLayout(
+                        name=decl.name,
+                        verbs=decl.verbs,
+                        counting=decl.counting,
+                        per_target=False,
+                        bound=bound,
+                        slots=cursor,
+                    )
+                )
+                cursor += 1
+
+        self._layouts = tuple(layouts)
+        self._state_len = cursor
+        self._q0: tuple[int, ...] = tuple(0 for _ in range(cursor))
 
     # --- immutable views ---
 
@@ -145,12 +198,11 @@ class Automaton:
         return self._policy
 
     @property
-    def counter_names(self) -> tuple[str, ...]:
-        return self._counter_names
-
-    @property
-    def bounds(self) -> tuple[int, ...]:
-        return self._bounds
+    def layouts(self) -> tuple["_CounterLayout", ...]:
+        """One entry per DECLARED counter (not per flat state slot). Used by
+        `Monitor.remaining` and block explanation to walk counters without
+        knowing the flat slot layout."""
+        return self._layouts
 
     @property
     def q0(self) -> tuple[int, ...]:
@@ -205,10 +257,12 @@ class Automaton:
             return BAD
         if not isinstance(symbol, Symbol):
             raise TypeError(f"expected a Symbol, got {type(symbol).__name__}")
-        if not isinstance(q, tuple) or len(q) != len(self._bounds):
+        if not isinstance(q, tuple) or len(q) != self._state_len:
             raise ValueError("state does not belong to this automaton")
 
-        # Fail-closed sinks (DESIGN.md section 1.2).
+        # Fail-closed sinks (DESIGN.md section 1.2). symbol.target is a member
+        # of T from this point on, which is what makes the per-target slot
+        # lookup below total.
         if symbol.is_sink:
             return BAD
 
@@ -225,14 +279,17 @@ class Automaton:
             return BAD
 
         # Cap. Counters are monotone non-decreasing, so a single comparison per
-        # counter suffices and no history beyond the valuation is needed.
+        # counter (or per (counter, target) slot -- SPEC.md 2.1b) suffices and
+        # no history beyond the valuation is needed.
         values = list(q)
-        for i, verbs in enumerate(self._counter_verbs):
-            if symbol.verb in verbs:
-                new_value = values[i] + symbol.amount
-                if new_value > self._bounds[i]:
+        for layout in self._layouts:
+            if symbol.verb in layout.verbs:
+                idx = layout.slots[symbol.target] if layout.per_target else layout.slots
+                increment = 1 if layout.counting else symbol.amount
+                new_value = values[idx] + increment
+                if new_value > layout.bound:
                     return BAD
-                values[i] = new_value
+                values[idx] = new_value
 
         return tuple(values)
 
@@ -248,8 +305,16 @@ class Automaton:
     def describe_state(self, q: State) -> str:
         if q is BAD:
             return "q_bad"
-        parts = [
-            f"{name}={value}/{bound}"
-            for name, value, bound in zip(self._counter_names, q, self._bounds)
-        ]
+        parts: list[str] = []
+        for layout in self._layouts:
+            if layout.per_target:
+                touched = sorted(
+                    (t or "<no-target>", q[i])
+                    for t, i in layout.slots.items()
+                    if q[i]
+                )
+                detail = ", ".join(f"{t}={v}" for t, v in touched) or "none touched"
+                parts.append(f"{layout.name}[{detail}]/{layout.bound} each")
+            else:
+                parts.append(f"{layout.name}={q[layout.slots]}/{layout.bound}")
         return "(" + ", ".join(parts) + ")" if parts else "()"

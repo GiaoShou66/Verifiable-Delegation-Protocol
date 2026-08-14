@@ -54,7 +54,12 @@ def render_formal(policy: Policy) -> str:
     lines: list[str] = []
     for decl in policy.counters:
         verbs = ", ".join(sorted(decl.verbs))
-        lines.append(f"counter {decl.name} over {{{verbs}}}")
+        suffix = ""
+        if decl.per_target:
+            suffix += " per target"
+        if decl.counting:
+            suffix += " counting calls"
+        lines.append(f"counter {decl.name} over {{{verbs}}}{suffix}")
     if policy.counters:
         lines.append("")
 
@@ -81,10 +86,12 @@ def _cap_limits(policy: Policy, verb: str) -> list[str]:
             continue
         shared = sorted(decl.verbs - {verb})
         together = f", shared with {', '.join(shared)}" if shared else ""
-        out.append(
-            f"at most {format_amount(cap.bound, cap.unit)} in total"
-            f' (running total "{decl.name}"{together})'
+        per = " to any one target" if decl.per_target else " in total"
+        kind = "call count" if decl.counting else "running total"
+        unit_text = f"{cap.bound:,} call(s)" if decl.counting else format_amount(
+            cap.bound, cap.unit
         )
+        out.append(f'at most {unit_text}{per} ({kind} "{decl.name}"{together})')
     return out
 
 

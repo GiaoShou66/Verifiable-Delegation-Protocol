@@ -1,10 +1,13 @@
 """VDP L1 — tokenizer and recursive-descent parser (DESIGN.md section 2.2).
 
-Grammar, verbatim from DESIGN.md:
+Grammar, verbatim from DESIGN.md, extended per SPEC.md sections 2.1a
+(call-counting) and 2.1b (per-target) counters (spec revision vdp-spec-0.3):
 
-    policy      ::= decls clause ( "and" clause )*
-    decls       ::= ( "counter" ident "over" verbset )*
-    clause      ::= cap | whitelist | prohibition
+    policy        ::= decls clause ( "and" clause )*
+    decls         ::= ( "counter" ident "over" verbset scope_mode? counting_mode? )*
+    scope_mode    ::= "per" "target"
+    counting_mode ::= "counting" "calls"
+    clause        ::= cap | whitelist | prohibition
     cap         ::= "always" "(" ident "<=" integer unit? ")"
     whitelist   ::= "always" "(" ident "(" "target" ")" "->" "target" "in" set ")"
     prohibition ::= "always" "(" "not" ident ")"
@@ -191,7 +194,25 @@ class _Parser:
             name = self._take("IDENT", "a counter name").value
             self._take_word("over")
             verbs = self._parse_verbset()
-            decls.append(self._build(CounterDecl, name=name, verbs=verbs))
+            per_target = False
+            if self._at_word("per"):
+                self._take_word("per")
+                self._take_word("target")
+                per_target = True
+            counting = False
+            if self._at_word("counting"):
+                self._take_word("counting")
+                self._take_word("calls")
+                counting = True
+            decls.append(
+                self._build(
+                    CounterDecl,
+                    name=name,
+                    verbs=verbs,
+                    counting=counting,
+                    per_target=per_target,
+                )
+            )
         return decls
 
     def _parse_clause(self) -> Clause:

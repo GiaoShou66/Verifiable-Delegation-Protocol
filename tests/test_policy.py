@@ -90,6 +90,110 @@ def test_comments_and_whitespace_are_ignored():
     assert phi.caps[0].unit is None
 
 
+# --------------------------------------------------------------------------
+# call-counting counters (SPEC.md section 2.1a)
+# --------------------------------------------------------------------------
+
+
+def test_counting_calls_parses_and_is_reflected_in_the_ast():
+    phi = parse(
+        """
+        counter checks over {check_status} counting calls
+        always(checks <= 5)
+        """
+    )
+    assert phi.counters == (
+        CounterDecl(name="checks", verbs=frozenset({"check_status"}), counting=True),
+    )
+
+
+def test_omitting_counting_calls_defaults_to_amount_summing():
+    phi = demo_policy()
+    assert phi.counters[0].counting is False
+
+
+def test_counting_flag_round_trips_through_render_formal():
+    phi = parse(
+        """
+        counter checks over {check_status} counting calls
+        always(checks <= 5)
+        """
+    )
+    assert parse(render_formal(phi)) == phi
+    assert "counting calls" in render_formal(phi)
+
+
+def test_render_english_describes_a_counting_counter_in_calls_not_amount():
+    phi = parse(
+        """
+        counter checks over {check_status} counting calls
+        always(checks <= 5)
+        """
+    )
+    text = render_english(phi)
+    assert "call(s)" in text
+    assert "call count" in text
+
+
+def test_counting_field_rejects_non_bool():
+    with pytest.raises(PolicyError):
+        CounterDecl(name="c", verbs=frozenset({"pay"}), counting="yes")  # type: ignore[arg-type]
+
+
+def test_counting_and_calls_are_reserved_words():
+    for word in ("counting", "calls"):
+        with pytest.raises(PolicyError):
+            CounterDecl(name=word, verbs=frozenset({"pay"}))
+
+
+# --------------------------------------------------------------------------
+# per-target counters (SPEC.md section 2.1b)
+# --------------------------------------------------------------------------
+
+
+def test_per_target_parses_and_is_reflected_in_the_ast():
+    phi = parse(
+        """
+        counter spend over {pay} per target
+        always(spend <= 100)
+        and always(pay(target) -> target in {"alice", "bob"})
+        """
+    )
+    assert phi.counters == (
+        CounterDecl(name="spend", verbs=frozenset({"pay"}), per_target=True),
+    )
+
+
+def test_per_target_and_counting_calls_combine_in_declared_order():
+    phi = parse(
+        """
+        counter checks over {check_status} per target counting calls
+        always(checks <= 3)
+        """
+    )
+    decl = phi.counters[0]
+    assert decl.per_target is True
+    assert decl.counting is True
+    assert parse(render_formal(phi)) == phi
+    assert "per target counting calls" in render_formal(phi)
+
+
+def test_per_target_field_rejects_non_bool():
+    with pytest.raises(PolicyError):
+        CounterDecl(name="c", verbs=frozenset({"pay"}), per_target="yes")  # type: ignore[arg-type]
+
+
+def test_per_target_render_english_says_to_any_one_target():
+    phi = parse(
+        """
+        counter spend over {pay} per target
+        always(spend <= 100)
+        and always(pay(target) -> target in {"alice", "bob"})
+        """
+    )
+    assert "to any one target" in render_english(phi)
+
+
 @pytest.mark.parametrize(
     "text",
     [

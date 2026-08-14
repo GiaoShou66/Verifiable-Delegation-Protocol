@@ -64,9 +64,23 @@ class PolicyError(ValueError):
 #: Sentinel target for actions that act on no entity. Always a member of T.
 NO_TARGET = ""
 
-#: Grammar keywords (DESIGN.md section 2.2). Cannot be used as verb or counter
-#: names, otherwise `render_formal` would emit text that does not re-parse.
-RESERVED_WORDS = frozenset({"always", "and", "counter", "in", "not", "over", "target"})
+#: Grammar keywords (DESIGN.md section 2.2, extended by SPEC.md section 2.1a).
+#: Cannot be used as verb or counter names, otherwise `render_formal` would
+#: emit text that does not re-parse.
+RESERVED_WORDS = frozenset(
+    {
+        "always",
+        "and",
+        "calls",
+        "counter",
+        "counting",
+        "in",
+        "not",
+        "over",
+        "per",
+        "target",
+    }
+)
 
 _IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -118,15 +132,36 @@ def _freeze_strs(values: object, what: str, check) -> frozenset[str]:
 
 @dataclass(frozen=True, slots=True)
 class CounterDecl:
-    """`counter <name> over {<verbs>}` — which verbs contribute to which counter.
+    """`counter <name> over {<verbs>} [per target] [counting calls]` — which
+    verbs contribute to which counter, and how.
 
     Counters are monotone non-decreasing (DESIGN.md section 2.1): no decrement,
     no reset, no time window. That is what keeps Q finite and what makes the
     worst-case analysis in L2 sound.
+
+    `counting`: False (default) means the amount-summing counter DESIGN.md
+    describes — each matching action contributes its `amount`. True means a
+    CALL-COUNTING counter — each matching action contributes exactly 1,
+    regardless of amount. This is the same automaton shape (monotone, bounded,
+    q_bad on overflow); only the increment changes. It exists to bound the
+    number of times a zero-cost or variable-cost verb (`read_balance`,
+    `check_status`) may be called, which an amount-summing counter cannot do —
+    a verb with a cap but a zero-amount path is unbounded in call count under
+    the amount-summing rule alone.
+
+    `per_target`: False (default) means ONE running total shared across every
+    target the counter's verbs touch. True means an INDEPENDENT running total
+    PER TARGET — the bound applies to each target separately ("at most $100
+    to any ONE recipient" rather than "$100 total across all recipients").
+    Still monotone and bounded: T is finite (section 1.2), so this widens Q by
+    a finite, known factor (one state dimension per (counter, target) pair)
+    rather than making it infinite — see SPEC.md section 2.1b.
     """
 
     name: str
     verbs: frozenset[str]
+    counting: bool = False
+    per_target: bool = False
 
     def __post_init__(self) -> None:
         _check_ident(self.name, "counter name")
@@ -137,6 +172,16 @@ class CounterDecl:
         )
         if not self.verbs:
             raise PolicyError(f"counter {self.name!r} has an empty verb set")
+        if not isinstance(self.counting, bool):
+            raise PolicyError(
+                f"counter {self.name!r}: counting must be a bool, "
+                f"got {type(self.counting).__name__}"
+            )
+        if not isinstance(self.per_target, bool):
+            raise PolicyError(
+                f"counter {self.name!r}: per_target must be a bool, "
+                f"got {type(self.per_target).__name__}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,9 +395,15 @@ class Policy:
             else:
                 clauses.append({"kind": "prohibition", "verb": clause.verb})
         return {
-            "version": 1,
+            "version": 2,
             "counters": [
-                {"name": d.name, "verbs": sorted(d.verbs)} for d in self.counters
+                {
+                    "name": d.name,
+                    "verbs": sorted(d.verbs),
+                    "counting": d.counting,
+                    "per_target": d.per_target,
+                }
+                for d in self.counters
             ],
             "clauses": clauses,
         }

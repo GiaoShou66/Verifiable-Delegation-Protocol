@@ -55,12 +55,26 @@ class CounterWorstCase:
     bound: int
     unit: str | None
     l_max: int
-    basis: str  # "cap" | "reachable" | "cap (dp skipped: table too large)"
+    basis: str  # "cap" | "reachable" | "cap (dp skipped: table too large)" | "calls"
+    counting: bool = False
+    #: SPEC.md section 2.1b. False: `l_max` already IS the aggregate worst
+    #: case. True: `l_max` is the PER-TARGET worst case, and the aggregate
+    #: across every target the counter's verbs can reach is
+    #: `l_max * target_count` -- reporting only `l_max` for a per-target
+    #: counter would understate total exposure by exactly that factor, which
+    #: is the dishonesty this preview exists to prevent (DESIGN.md 4.2).
+    per_target: bool = False
+    target_count: int = 1
 
     @property
     def is_tight(self) -> bool:
         """True when nothing the policy allows can add up to the full cap."""
         return self.l_max < self.bound
+
+    @property
+    def aggregate_l_max(self) -> int:
+        """Worst case summed across every target this counter can reach."""
+        return self.l_max * self.target_count if self.per_target else self.l_max
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +94,24 @@ class WorstCase:
         out: list[str] = []
 
         for item in self.counters:
-            amount = format_amount(item.l_max, item.unit)
+            unit_of = (
+                (lambda v: f"{v:,} call(s)") if item.counting
+                else (lambda v: format_amount(v, item.unit))
+            )
+            if item.per_target:
+                out.append(
+                    f"worst case {item.counter} <= {unit_of(item.l_max)} to any "
+                    f"ONE target, <= {unit_of(item.aggregate_l_max)} in aggregate "
+                    f"across {item.target_count} target(s) (your per-target cap);"
+                )
+                continue
+            if item.counting:
+                out.append(
+                    f"worst case {item.counter} <= {unit_of(item.l_max)} "
+                    f"(your cap on call count);"
+                )
+                continue
+            amount = unit_of(item.l_max)
             if item.basis == "reachable" and item.is_tight:
                 cap = format_amount(item.bound, item.unit)
                 why = f"nothing you allow adds up past it; your cap is {cap}"
@@ -196,6 +227,22 @@ def _verb_is_possible(
     return False
 
 
+def _target_count_for(policy: Policy, decl) -> int:
+    """How many distinct targets a per-target counter's verbs can reach.
+
+    Union, across the counter's verbs, of each verb's whitelist (or all of T
+    for a verb with no whitelist of its own -- section 2.4 of policy.ast: no
+    whitelist means no target restriction on that verb). This is the
+    multiplier the aggregate worst case (CounterWorstCase.aggregate_l_max)
+    is honest about.
+    """
+    reached: set[str] = set()
+    for verb in decl.verbs:
+        whitelist = policy.whitelist_for(verb)
+        reached |= whitelist.allowed if whitelist is not None else policy.targets
+    return max(len(reached), 1)
+
+
 def worst_case(
     policy: Policy, cost_model: Mapping[str, object] | None = None
 ) -> WorstCase:
@@ -217,6 +264,27 @@ def worst_case(
         if cap is None:  # unreachable: the AST rejects an uncapped counter
             raise ValueError(f"counter {decl.name!r} has no cap")
 
+        target_count = _target_count_for(policy, decl) if decl.per_target else 1
+
+        if decl.counting:
+            # Each matching call contributes exactly 1 (monitor/automaton.py
+            # delta), independent of amount or any cost model, so the bound
+            # itself IS the reachable maximum: 0..bound is densely reachable
+            # one call at a time.
+            counters.append(
+                CounterWorstCase(
+                    counter=decl.name,
+                    bound=cap.bound,
+                    unit=cap.unit,
+                    l_max=cap.bound,
+                    basis="calls",
+                    counting=True,
+                    per_target=decl.per_target,
+                    target_count=target_count,
+                )
+            )
+            continue
+
         covered = all(verb in costs for verb in decl.verbs)
         if not covered:
             counters.append(
@@ -226,6 +294,8 @@ def worst_case(
                     unit=cap.unit,
                     l_max=cap.bound,
                     basis="cap",
+                    per_target=decl.per_target,
+                    target_count=target_count,
                 )
             )
             continue
@@ -241,6 +311,8 @@ def worst_case(
                     unit=cap.unit,
                     l_max=cap.bound,
                     basis="cap (dp skipped: table too large)",
+                    per_target=decl.per_target,
+                    target_count=target_count,
                 )
             )
             continue
@@ -252,6 +324,8 @@ def worst_case(
                 unit=cap.unit,
                 l_max=_reachable_max(cap.bound, frozenset(union)),
                 basis="reachable",
+                per_target=decl.per_target,
+                target_count=target_count,
             )
         )
 
@@ -276,9 +350,14 @@ def worst_case(
         verb_counters = policy.counters_for_verb(verb)
         if not verb_counters:
             uncapped.append(verb)
+        elif any(decl.counting for decl in verb_counters):
+            # A call-counting counter bounds the number of calls directly
+            # (SPEC.md 2.1a), regardless of amount or cost model, so this verb
+            # is NOT in the unbounded-count case below.
+            pass
         elif verb_costs is None or 0 in verb_costs:
-            # A zero-amount call never advances a counter, so the number of
-            # calls is unbounded even though the total is capped.
+            # A zero-amount call never advances an amount-summing counter, so
+            # the number of calls is unbounded even though the total is capped.
             unbounded_count.append(verb)
 
     known_targets = sorted(t for t in policy.targets if t != NO_TARGET)

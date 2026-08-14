@@ -6,6 +6,11 @@ verbs, near-miss target names, boundary and over-boundary amounts, negative
 amounts, floats, bools, None, and wrong types. The point is that the monitor
 must return a Decision for every one of them -- never an exception, never an
 allow it should not have made.
+
+`scopes()` and `widening_caveats()` serve the L3 obligation. The name alphabets
+are deliberately TINY so that generated sets actually overlap -- caveats drawn
+from a large universe would almost always intersect to the empty set, which
+satisfies the monotonicity assertion trivially and tests nothing.
 """
 
 from __future__ import annotations
@@ -14,8 +19,16 @@ from hypothesis import strategies as st
 
 from monitor.automaton import ConcreteAction
 from policy.ast import Cap, CounterDecl, Policy, Prohibition, RESERVED_WORDS, Whitelist
+from tokens.scope import Scope
 
-__all__ = ["IDENTS", "TARGETS", "hostile_actions", "policies"]
+__all__ = [
+    "IDENTS",
+    "TARGETS",
+    "hostile_actions",
+    "policies",
+    "scopes",
+    "widening_caveats",
+]
 
 IDENTS = st.from_regex(r"\A[a-z][a-z0-9_]{0,6}\Z").filter(
     lambda s: s not in RESERVED_WORDS
@@ -116,4 +129,59 @@ def hostile_actions(policy: Policy) -> st.SearchStrategy:
         target=targets,
         amount=_amounts(policy),
         attrs=st.just({}),
+    )
+
+
+# --------------------------------------------------------------------------
+# L3 — scopes and caveats
+# --------------------------------------------------------------------------
+
+#: A tiny shared universe, so intersections are usually non-empty.
+SCOPE_NAMES = st.sampled_from(["pay", "read", "wipe", "send"])
+SCOPE_TARGETS = st.sampled_from(["alice", "bob", "carol", "mallory", ""])
+
+_NAME_SETS = st.one_of(
+    st.none(),  # TOP -- constrains nothing
+    st.frozensets(SCOPE_NAMES, max_size=4),
+    st.frozensets(SCOPE_TARGETS, max_size=5),
+)
+_BOUNDS = st.one_of(st.none(), st.integers(min_value=0, max_value=100_000))
+
+
+def scopes() -> st.SearchStrategy:
+    """Arbitrary points in the scope lattice, TOP fields and empty sets included."""
+    return st.builds(
+        Scope,
+        verbs=st.one_of(st.none(), st.frozensets(SCOPE_NAMES, max_size=4)),
+        targets=st.one_of(st.none(), st.frozensets(SCOPE_TARGETS, max_size=5)),
+        max_amount=_BOUNDS,
+        max_total=_BOUNDS,
+        expires_at=_BOUNDS,
+    )
+
+
+def widening_caveats() -> st.SearchStrategy:
+    """Caveats that TRY to widen: supersets, huge bounds, far-future expiry.
+
+    These are the hostile ones. A caveat cannot widen anything -- meet is a
+    greatest lower bound -- so the point of generating them is to demonstrate
+    that, not to discover it.
+    """
+    huge = st.sampled_from([10**9, 10**12, 2**63])
+    return st.one_of(
+        scopes(),
+        st.builds(
+            Scope,
+            verbs=st.just(frozenset({"pay", "read", "wipe", "send", "transfer"})),
+            targets=st.just(
+                frozenset({"alice", "bob", "carol", "mallory", "dave", ""})
+            ),
+            max_amount=huge,
+            max_total=huge,
+            expires_at=huge,
+        ),
+        st.builds(Scope, max_amount=huge),
+        st.builds(Scope, max_total=huge),
+        st.builds(Scope, expires_at=huge),
+        st.just(Scope()),  # the identity caveat: narrows nothing at all
     )

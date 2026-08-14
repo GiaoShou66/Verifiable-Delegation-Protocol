@@ -368,9 +368,111 @@ def test_the_agent_can_never_reach_q_bad(data):
 # --------------------------------------------------------------------------
 
 
+def test_a_counting_counter_advances_by_one_regardless_of_amount():
+    """Three calls with amounts 0, 3, 1 -- if this counter summed amount it
+    would already be blocked on the third (0+3+1=4 > 3). It is not: a
+    counting counter advances by 1 per call, not by amount."""
+    phi = parse(
+        "counter checks over {check_status} counting calls\nalways(checks <= 3)"
+    )
+    monitor = Monitor(phi)
+    for amount in (0, 3, 1):
+        result = monitor.submit(ConcreteAction("check_status", NO_TARGET, amount))
+        assert result.decision == ALLOW
+    assert monitor.state == (3,)
+    # A 4th call of any amount, including 0, is blocked: the counter tracks
+    # CALLS, not amount.
+    result = monitor.submit(ConcreteAction("check_status", NO_TARGET, 0))
+    assert result.decision == BLOCK
+    assert monitor.state == (3,)
+
+
+def test_amount_summing_and_counting_counters_do_not_interfere():
+    """Two counters over the same verb: one sums amount, one counts calls."""
+    phi = parse(
+        """
+        counter spend over {pay}
+        counter pay_calls over {pay} counting calls
+        always(spend <= 1000)
+        and always(pay_calls <= 2)
+        and always(pay(target) -> target in {"alice"})
+        """
+    )
+    monitor = Monitor(phi)
+    r1 = monitor.submit(ConcreteAction("pay", "alice", 100))
+    assert r1.decision == ALLOW
+    assert monitor.state == (100, 1)
+    r2 = monitor.submit(ConcreteAction("pay", "alice", 100))
+    assert r2.decision == ALLOW
+    assert monitor.state == (200, 2)
+    # spend has headroom (200 <= 1000) but pay_calls is exhausted (2/2).
+    r3 = monitor.submit(ConcreteAction("pay", "alice", 1))
+    assert r3.decision == BLOCK
+    assert monitor.state == (200, 2)
+
+
 # --------------------------------------------------------------------------
 # per-target counters (SPEC.md section 2.1b)
 # --------------------------------------------------------------------------
+
+
+def test_per_target_counters_track_each_target_independently():
+    """$100 to any ONE recipient. Alice can be paid up to 100 even after Bob
+    has already been paid up to 100 -- the bound applies per target, not
+    across all of them."""
+    phi = parse(
+        """
+        counter spend over {pay} per target
+        always(spend <= 100)
+        and always(pay(target) -> target in {"alice", "bob"})
+        """
+    )
+    monitor = Monitor(phi)
+    r1 = monitor.submit(ConcreteAction("pay", "alice", 100))
+    assert r1.decision == ALLOW
+    r2 = monitor.submit(ConcreteAction("pay", "bob", 100))
+    assert r2.decision == ALLOW
+    # Alice is now exhausted; Bob is a DIFFERENT target and is unaffected.
+    r3 = monitor.submit(ConcreteAction("pay", "alice", 1))
+    assert r3.decision == BLOCK
+    r4 = monitor.submit(ConcreteAction("pay", "bob", 1))
+    assert r4.decision == BLOCK  # bob is now exhausted too, independently
+
+
+def test_per_target_and_global_counters_over_the_same_verb_are_independent():
+    phi = parse(
+        """
+        counter per_recipient over {pay} per target
+        counter total over {pay}
+        always(per_recipient <= 100)
+        and always(total <= 150)
+        and always(pay(target) -> target in {"alice", "bob"})
+        """
+    )
+    monitor = Monitor(phi)
+    assert monitor.submit(ConcreteAction("pay", "alice", 100)).decision == ALLOW
+    # Alice's per-target cap (100) is now exhausted, even though the global
+    # total (100/150) has headroom.
+    assert monitor.submit(ConcreteAction("pay", "alice", 1)).decision == BLOCK
+    # Bob has a fresh per-target allowance, but the GLOBAL total does not:
+    # 100 + 51 = 151 > 150.
+    assert monitor.submit(ConcreteAction("pay", "bob", 51)).decision == BLOCK
+    assert monitor.submit(ConcreteAction("pay", "bob", 50)).decision == ALLOW
+
+
+def test_describe_state_reports_only_touched_targets():
+    phi = parse(
+        """
+        counter spend over {pay} per target
+        always(spend <= 100)
+        and always(pay(target) -> target in {"alice", "bob"})
+        """
+    )
+    monitor = Monitor(phi)
+    monitor.submit(ConcreteAction("pay", "alice", 40))
+    text = monitor.describe_state()
+    assert "alice=40" in text
+    assert "bob" not in text  # untouched targets are not listed
 
 
 # --------------------------------------------------------------------------
@@ -426,6 +528,45 @@ def test_a_capped_verb_is_still_unbounded_in_call_count():
     omission would be the most misleading thing this preview could do."""
     lines = "\n".join(worst_case(demo_policy()).lines())
     assert "pay: unlimited number of times (the cap bounds the total" in lines
+
+
+def test_worst_case_reports_a_counting_counter_in_calls_and_bounds_the_verb():
+    phi = parse(
+        "counter checks over {check_status} counting calls\nalways(checks <= 7)"
+    )
+    result = worst_case(phi)
+    (checks,) = result.counters
+    assert checks.counting is True
+    assert checks.basis == "calls"
+    assert checks.l_max == 7
+    lines = "\n".join(result.lines())
+    assert "worst case checks <= 7 call(s)" in lines
+    # A call-counted verb is bounded in count, so it must NOT appear in either
+    # of the "unlimited" lists -- that would contradict the cap above.
+    assert "check_status" not in result.uncapped_verbs
+    assert "check_status" not in result.unbounded_count_verbs
+
+
+def test_worst_case_reports_per_target_cap_with_honest_aggregate():
+    """DESIGN.md 4.2's honesty rule, extended to per-target counters: the
+    preview must not report only the per-target bound and let the human
+    infer a smaller total than the policy actually permits."""
+    phi = parse(
+        """
+        counter spend over {pay} per target
+        always(spend <= 10000 cents)
+        and always(pay(target) -> target in {"alice", "bob", "carol"})
+        """
+    )
+    result = worst_case(phi)
+    (spend,) = result.counters
+    assert spend.per_target is True
+    assert spend.target_count == 3
+    assert spend.l_max == 10000
+    assert spend.aggregate_l_max == 30000
+    lines = "\n".join(result.lines())
+    assert "$100.00 to any ONE target" in lines
+    assert "$300.00 in aggregate across 3 target(s)" in lines
 
 
 def test_worst_case_rejects_a_cost_model_for_a_verb_phi_never_names():

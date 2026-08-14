@@ -93,15 +93,25 @@ class Monitor:
         return self._automaton.describe_state(self._q)
 
     def remaining(self) -> dict[str, int]:
-        """Headroom per counter. Reporting only; never consulted by delta."""
+        """Headroom per counter. Reporting only; never consulted by delta.
+
+        For a per_target counter (SPEC.md section 2.1b) this reports the
+        TIGHTEST remaining headroom across every target touched so far (the
+        minimum), since a single number cannot represent |T| independent
+        totals. It is advisory only, same as the rest of this method.
+        """
+        layouts = self._automaton.layouts
         if self._q is BAD:
-            return {name: 0 for name in self._automaton.counter_names}
-        return {
-            name: bound - value
-            for name, value, bound in zip(
-                self._automaton.counter_names, self._q, self._automaton.bounds
-            )
-        }
+            return {layout.name: 0 for layout in layouts}
+        out: dict[str, int] = {}
+        for layout in layouts:
+            if layout.per_target:
+                out[layout.name] = min(
+                    layout.bound - self._q[i] for i in layout.slots.values()
+                )
+            else:
+                out[layout.name] = layout.bound - self._q[layout.slots]
+        return out
 
     # --- mediation ---
 
@@ -168,15 +178,24 @@ class Monitor:
                     f"{symbol.target!r} is not on the whitelist for {symbol.verb}"
                 )
             if isinstance(q, tuple):
-                for i, name in enumerate(automaton.counter_names):
-                    decl = policy.counter_named(name)
-                    if symbol.verb in decl.verbs:
-                        total = q[i] + symbol.amount
-                        bound = automaton.bounds[i]
-                        if total > bound:
-                            reasons.append(
-                                f"would take {name} to {total}, over its cap of {bound}"
-                            )
+                for layout in automaton.layouts:
+                    if symbol.verb not in layout.verbs:
+                        continue
+                    idx = (
+                        layout.slots[symbol.target]
+                        if layout.per_target
+                        else layout.slots
+                    )
+                    increment = 1 if layout.counting else symbol.amount
+                    total = q[idx] + increment
+                    if total > layout.bound:
+                        where = (
+                            f" for target {symbol.target!r}" if layout.per_target else ""
+                        )
+                        reasons.append(
+                            f"would take {layout.name}{where} to {total}, "
+                            f"over its cap of {layout.bound}"
+                        )
 
         if q is BAD:
             reasons.append("monitor is already in q_bad (absorbing)")

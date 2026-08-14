@@ -1,6 +1,11 @@
 # VDP — Verifiable Delegation Protocol
 
-**Design document. Revision 0.1. No implementation code exists yet.**
+**Design document. Revision 0.2. The reference implementation now exists and matches this
+document except where §11 records a deliberate change.**
+
+> This document carries rationale, proofs, and worked examples. The normative wire formats,
+> grammar, and decision procedures an implementation must reproduce live in
+> [SPEC.md](SPEC.md) — read that first if you are implementing VDP rather than studying it.
 
 Implementation language: **Python 3.11+**, standard library only for the enforcement path
 (`hmac`, `hashlib`, `json`). Test-only dependencies: `pytest`, `hypothesis`.
@@ -634,13 +639,73 @@ resistance, key secrecy:
 
 ---
 
-## 10. Open questions for review
+## 10. Changes made during implementation
+
+Five deviations from revision 0.1. Each is recorded here rather than left as a silent
+difference between the document and the code.
+
+### 10.1 `T` always contains a `NO_TARGET` sentinel
+
+§1.2 derived `T` from whitelists and prohibitions alone. Prohibitions name no targets, so a
+target-less action (`read_balance`, `check_status`) had no legal symbol and would have been
+blocked unconditionally. `T` now always contains the empty string, which no whitelist may
+name. This widens `T` by exactly one element that cannot collide with a real recipient.
+
+### 10.2 A root token's scope excludes prohibited verbs, and carries no `max_total`
+
+`Scope.root_from_policy` derives `verbs` from `V` **minus** the prohibited verbs. `V` is the
+universe of verbs *named* in φ, and a prohibited verb is named there precisely so the monitor
+can refuse it; including it in the root scope would make the token claim an authority the
+monitor blocks unconditionally.
+
+`max_total` is left unbounded on a root token. §5.4 says a token cannot encode "you have
+already spent 400" because that is monitor state — so a root token that carried a cumulative
+bound equal to the cap would *shadow* the monitor's counter rather than compose with it,
+since whichever gate is tighter fires first and the other never runs. `max_total` now exists
+solely so a parent can hand a child a smaller cumulative allowance out of the shared cap.
+Confirmed by the demo: the salami-slicing attack is refused by the **monitor**, which is
+where trace history belongs.
+
+### 10.3 `max_total` is enforced by the shim, as a third conjunctive gate
+
+A cumulative bound cannot be decided from a single action, so `runtime.shim` keeps a
+per-token running total. This is **not** monitor state and does not weaken §3.4: a gate that
+only ever blocks more cannot enlarge the set of executed traces, and the automaton argument
+is a statement about exactly that set.
+
+### 10.4 The audit log is canonicalized ASCII-only
+
+§6.1 did not specify the JSON escaping. It now uses `ensure_ascii=True`, which is a format
+requirement rather than a style choice. JSONL means one record per **physical line**, and an
+agent controls the target string; `str.splitlines()` and many other line splitters break on
+U+0085, U+000B, U+000C, U+2028 and U+2029 as well as on newline. An unescaped one of those
+inside a target would split a single record into two for such a reader. Found by the
+adversarial fuzzer, not by review.
+
+`Record.from_obj` also validates field **types**, and requires `hash`, `sig`, `prev_hash` and
+`policy_hash` to be 64-character lowercase hex. Without that, a tampered digest containing a
+non-ASCII character made `hmac.compare_digest` raise, turning a detection into a crash. Also
+found by the fuzzer. `token_id` is deliberately exempt: it carries `"<no-token>"` when an
+agent presented none.
+
+### 10.5 `Outcome.gate` reports which gate refused
+
+Reporting only, for the demo and for operators. The gates are a conjunction, so it names the
+first gate that fired, not the only one that would have.
+
+---
+
+## 11. Open questions for review
 
 1. **Continuous vs. discrete amounts.** §4.1 gives `L_max = N_i` whenever the agent picks
    amounts freely. The discrete DP only pays off when the shim's mapping table fixes costs.
    Is the discrete case worth building in v0.1, or should it wait until a scenario needs it?
-2. **Counter scoping.** v0.1 has counters over verb sets only. Per-target counters
-   ("at most $100 to any one recipient") are a natural next form and remain safety
-   properties, but they enlarge Q to `∏(N+1)^|T|`. Deferred unless you want it now.
+2. **Counter scoping.** ~~v0.1 has counters over verb sets only.~~ **Resolved in
+   `vdp-spec-0.3`** (SPEC.md §2.1b, CHANGELOG.md): per-target counters ("at most $100
+   to any one recipient") shipped. The `∏(N+1)^|T|` worry below was a red herring —
+   δ is never materialized as a table (§1.2), so the reference implementation
+   allocates one flat state SLOT per `(counter, target)` pair rather than
+   enumerating the product; runtime cost is O(|T|) machine words per per-target
+   counter, not O(∏).
 3. **Expiry.** `expires_at` sits in the token scope, not in φ. That keeps wall-clock time
    out of the automaton entirely. Confirm that is the split you want.
