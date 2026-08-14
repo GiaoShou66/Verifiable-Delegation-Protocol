@@ -265,6 +265,28 @@ def test_revoking_a_parent_does_not_revoke_an_already_minted_child(shim, token):
 def test_revoke_rejects_a_non_string_token_id(shim):
     with pytest.raises(ShimError, match="token_id must be a string"):
         shim.revoke(12345)  # type: ignore[arg-type]
+def test_on_append_is_called_with_the_new_head_after_every_record(tmp_path, phi, token):
+    published: list[str] = []
+    log = AuditLog(
+        tmp_path / "a.jsonl", phi.digest(), LOG_KEY, on_append=published.append
+    )
+    shim = AgentShim(Monitor(phi), TOOLS, log, ROOT_KEY, executor=lambda n, a: "ok")
+
+    shim.call("pay_bill", {"recipient": "alice_utility", "cents": 100}, token)
+    assert len(published) == 1
+    assert published[0] == log.head
+
+    # A BLOCK also advances the chain (it's evidence, not automaton state)
+    # and must be published too.
+    shim.call("pay_bill", {"recipient": "mallory", "cents": 100}, token)
+    assert len(published) == 2
+    assert published[1] == log.head
+    assert published[0] != published[1]
+
+
+def test_on_append_is_optional_and_backward_compatible(tmp_path, phi):
+    # No on_append at all -- unaffected default construction path.
+    AuditLog(tmp_path / "a.jsonl", phi.digest(), LOG_KEY)
 def test_a_token_bound_to_a_different_policy_is_refused(tmp_path, phi):
     other = parse("counter spend over {pay}\nalways(spend <= 1)")
     log = AuditLog(tmp_path / "a.jsonl", phi.digest(), LOG_KEY)

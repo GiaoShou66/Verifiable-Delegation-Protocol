@@ -39,6 +39,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from monitor.automaton import BAD, Automaton, Symbol
 
@@ -241,9 +242,34 @@ class AuditLog:
     through `runtime.shim`, which exposes `call()` and nothing else.
     """
 
-    __slots__ = ("_path", "_policy_hash", "_log_key", "_last_hash", "_seq")
+    __slots__ = ("_path", "_policy_hash", "_log_key", "_last_hash", "_seq", "_on_append")
 
-    def __init__(self, path: str | Path, policy_hash: str, log_key: bytes) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        policy_hash: str,
+        log_key: bytes,
+        *,
+        on_append: "Callable[[str], None] | None" = None,
+    ) -> None:
+        """
+        `on_append`: optional. If given, called with the new `head` hash
+        (hex string) after every successful `append()` -- including for a
+        BLOCK, since a blocked attempt still advances the chain (section
+        6.1: it is evidence, not automaton state). This is the first-class
+        way to publish the latest hash somewhere the agent cannot write, so
+        that tail truncation (section 6.3's documented gap: undetectable
+        without an external anchor) becomes detectable to anyone who saw a
+        later `head` than what a tampered file now shows. `AuditLog.head`
+        already exposed this value as a property; `on_append` exists because
+        a value nobody is wired to read protects nothing.
+
+        Exceptions raised by `on_append` propagate to the `append()` caller
+        AFTER the record has already been written to disk and `_last_hash`
+        updated -- publication failing is not grounds to un-write a record
+        that already happened, the same "under-spend, never roll back"
+        philosophy DESIGN.md section 3.3 applies to execution.
+        """
         if not isinstance(log_key, (bytes, bytearray)) or len(log_key) < 32:
             raise AuditLogError("log_key must be at least 32 bytes")
         self._path = Path(path)
@@ -251,6 +277,7 @@ class AuditLog:
         self._log_key = bytes(log_key)
         self._last_hash = genesis_hash(policy_hash)
         self._seq = 0
+        self._on_append = on_append
 
         # Resume an existing log rather than overwriting it: opening for write
         # would be a delete in disguise.
@@ -333,6 +360,8 @@ class AuditLog:
 
         self._last_hash = digest
         self._seq += 1
+        if self._on_append is not None:
+            self._on_append(digest)
         return record
 
     def records(self) -> list[Record]:
@@ -358,9 +387,8 @@ class AuditLog:
         The automaton check is PURE TRANSITION CHECKING: recompute
         delta(pre_state, symbol) and confirm it equals post_state for an ALLOW,
         or lands in q_bad with post_state == pre_state for a BLOCK. No network,
-        no clock. The crypto is only there to detect tampering with the FILE; the
-        automaton check is what establishes that the decisions were the ones phi
-        mandates.
+        no clock. The crypto only detects tampering with the FILE; the automaton
+        check is what establishes that the decisions were the ones phi mandates.
         """
         problems: list[str] = []
         prev = genesis_hash(self._policy_hash)
