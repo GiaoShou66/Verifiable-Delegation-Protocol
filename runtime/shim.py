@@ -226,6 +226,7 @@ class AgentShim:
         "_executor",
         "_spent",
         "_artifact_hash",
+        "_revoked",
     )
 
     def __init__(
@@ -285,6 +286,15 @@ class AgentShim:
         self._executor = executor
         self._spent: dict[str, int] = {}
         self._artifact_hash = computed_artifact_hash
+        #: Revoked token_ids (tokens.macaroon.Token.token_id()). A THIRD
+        #: conjunctive gate, same shape as max_total (DESIGN.md 3.3's "a gate
+        #: that only ever blocks more cannot enlarge the set of executed
+        #: traces" argument applies unchanged): revoking a token can only
+        #: turn a future ALLOW into a BLOCK, never the reverse, so section
+        #: 3.4's correctness argument is untouched by this gate existing.
+        #: Empty by default -- nothing is ever revoked unless `revoke()` is
+        #: called, so this is fully backward compatible.
+        self._revoked: set[str] = set()
 
     # --- operator-facing views. NOT part of the agent's surface. ---
 
@@ -311,6 +321,23 @@ class AgentShim:
 
     def spent_under(self, token: Token) -> int:
         return self._spent.get(token.token_id(), 0)
+
+    def revoke(self, token_id: str) -> None:
+        """Revoke a token (or an entire delegation subtree) by token_id.
+
+        Revoking a PARENT's token_id does not automatically revoke a CHILD's
+        -- attenuate() produces a new scope chain and therefore a new
+        token_id (SPEC.md section 5.5). A caller that needs "revoke this
+        agent and everything it delegated to" must track and revoke each
+        token_id in that subtree individually; this method does not attempt
+        subtree discovery, since the shim holds no delegation graph.
+        """
+        if not isinstance(token_id, str):
+            raise ShimError(f"token_id must be a string, got {type(token_id).__name__}")
+        self._revoked.add(token_id)
+
+    def is_revoked(self, token_id: str) -> bool:
+        return token_id in self._revoked
 
     # --- the agent's entire surface ---
 
@@ -407,6 +434,8 @@ class AgentShim:
         # the policy THIS shim enforces.
         if token.policy_hash and token.policy_hash != self._monitor.policy.digest():
             return "token was minted for a different policy artifact"
+        if token.token_id() in self._revoked:
+            return "token has been revoked"
         if not token.root.names_capabilities:
             return (
                 "token's root scope leaves verbs or targets unrestricted; a root "

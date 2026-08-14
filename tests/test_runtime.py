@@ -223,6 +223,48 @@ def test_a_log_opened_under_another_policy_is_refused(tmp_path, phi):
         AgentShim(Monitor(phi), TOOLS, log, ROOT_KEY)
 
 
+def test_revoking_a_token_blocks_future_calls(shim, token):
+    outcome = shim.call(
+        "pay_bill", {"recipient": "alice_utility", "cents": 100}, token
+    )
+    assert outcome.allowed
+
+    shim.revoke(token.token_id())
+    assert shim.is_revoked(token.token_id())
+
+    outcome2 = shim.call(
+        "pay_bill", {"recipient": "alice_utility", "cents": 100}, token
+    )
+    assert not outcome2.allowed
+    assert outcome2.gate == "token"
+    assert "revoked" in outcome2.reason
+
+
+def test_revocation_does_not_undo_the_earlier_allow(shim, token):
+    """Revoking can only block MORE, never less -- the earlier ALLOW and its
+    counter advance stand; only future calls with this token are affected."""
+    outcome = shim.call(
+        "pay_bill", {"recipient": "alice_utility", "cents": 100}, token
+    )
+    assert outcome.allowed
+    remaining_before = shim.remaining()
+    shim.revoke(token.token_id())
+    assert shim.remaining() == remaining_before
+
+
+def test_revoking_a_parent_does_not_revoke_an_already_minted_child(shim, token):
+    """attenuate() produces a NEW token_id (SPEC.md 5.5); revoking the
+    parent's token_id has no effect on a child's, by design (see
+    AgentShim.revoke's docstring)."""
+    child = attenuate(token, Scope(max_amount=50))
+    shim.revoke(token.token_id())
+    outcome = shim.call("pay_bill", {"recipient": "alice_utility", "cents": 10}, child)
+    assert outcome.allowed
+
+
+def test_revoke_rejects_a_non_string_token_id(shim):
+    with pytest.raises(ShimError, match="token_id must be a string"):
+        shim.revoke(12345)  # type: ignore[arg-type]
 def test_a_token_bound_to_a_different_policy_is_refused(tmp_path, phi):
     other = parse("counter spend over {pay}\nalways(spend <= 1)")
     log = AuditLog(tmp_path / "a.jsonl", phi.digest(), LOG_KEY)
