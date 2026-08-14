@@ -1,0 +1,97 @@
+{
+  "$comment": "VDP conformance vectors for per-target counters, spec revision vdp-spec-0.3 (SPEC.md section 2.1b). State tuple order: per_target=true counters occupy one slot per target, in SORTED target order (including the NO_TARGET sentinel, the empty string, which sorts first). Here the policy's targets are {\"\", \"alice\", \"bob\"}, so a single per-target counter over {pay} occupies 3 flat slots in the order [\"\" , alice, bob].",
+  "spec_version": "vdp-spec-0.3",
+  "vectors": [
+    {
+      "name": "per_target_counters_track_independently",
+      "description": "$1.00 to any ONE recipient (bound=100, per_target=true). Paying alice to her limit does not affect bob's independent allowance, and vice versa. State slot order is [NO_TARGET, alice, bob].",
+      "policy": {
+        "version": 2,
+        "counters": [
+          { "name": "spend", "verbs": ["pay"], "counting": false, "per_target": true }
+        ],
+        "clauses": [
+          { "kind": "cap", "counter": "spend", "bound": 100, "unit": null },
+          { "kind": "whitelist", "verb": "pay", "allowed": ["alice", "bob"] }
+        ]
+      },
+      "policy_notes": {
+        "T_sorted": ["", "alice", "bob"],
+        "q0": [0, 0, 0],
+        "c_max": 100
+      },
+      "steps": [
+        {
+          "action": { "verb": "pay", "target": "alice", "amount": 100 },
+          "expect": { "decision": "ALLOW", "pre_state": [0, 0, 0], "post_state": [0, 100, 0] }
+        },
+        {
+          "action": { "verb": "pay", "target": "bob", "amount": 100 },
+          "expect": { "decision": "ALLOW", "pre_state": [0, 100, 0], "post_state": [0, 100, 100] }
+        },
+        {
+          "action": { "verb": "pay", "target": "alice", "amount": 1 },
+          "expect": {
+            "decision": "BLOCK",
+            "pre_state": [0, 100, 100],
+            "post_state": [0, 100, 100],
+            "note": "alice's slot is exhausted (100/100); bob's identical exhaustion did not affect it."
+          }
+        },
+        {
+          "action": { "verb": "pay", "target": "bob", "amount": 1 },
+          "expect": { "decision": "BLOCK", "pre_state": [0, 100, 100], "post_state": [0, 100, 100] }
+        }
+      ]
+    },
+    {
+      "name": "per_target_and_global_counter_over_the_same_verb",
+      "description": "Two counters over {pay}: per_recipient (per-target, cap 100) and total (global, cap 150). State slot order: per_recipient occupies 3 slots [\"\", alice, bob] (indices 0-2), then total occupies 1 slot (index 3).",
+      "policy": {
+        "version": 2,
+        "counters": [
+          { "name": "per_recipient", "verbs": ["pay"], "counting": false, "per_target": true },
+          { "name": "total", "verbs": ["pay"], "counting": false, "per_target": false }
+        ],
+        "clauses": [
+          { "kind": "cap", "counter": "per_recipient", "bound": 100, "unit": null },
+          { "kind": "cap", "counter": "total", "bound": 150, "unit": null },
+          { "kind": "whitelist", "verb": "pay", "allowed": ["alice", "bob"] }
+        ]
+      },
+      "policy_notes": {
+        "T_sorted": ["", "alice", "bob"],
+        "q0": [0, 0, 0, 0],
+        "c_max": 150
+      },
+      "steps": [
+        {
+          "action": { "verb": "pay", "target": "alice", "amount": 100 },
+          "expect": { "decision": "ALLOW", "pre_state": [0, 0, 0, 0], "post_state": [0, 100, 0, 100] }
+        },
+        {
+          "action": { "verb": "pay", "target": "alice", "amount": 1 },
+          "expect": {
+            "decision": "BLOCK",
+            "pre_state": [0, 100, 0, 100],
+            "post_state": [0, 100, 0, 100],
+            "note": "alice's per-target slot (100/100) blocks even though the global total (100/150) has headroom."
+          }
+        },
+        {
+          "action": { "verb": "pay", "target": "bob", "amount": 51 },
+          "expect": {
+            "decision": "BLOCK",
+            "pre_state": [0, 100, 0, 100],
+            "post_state": [0, 100, 0, 100],
+            "note": "bob has a fresh per-target allowance (0/100), but the GLOBAL total does not: 100 + 51 = 151 > 150."
+          }
+        },
+        {
+          "action": { "verb": "pay", "target": "bob", "amount": 50 },
+          "expect": { "decision": "ALLOW", "pre_state": [0, 100, 0, 100], "post_state": [0, 100, 50, 150] }
+        }
+      ]
+    }
+  ]
+}

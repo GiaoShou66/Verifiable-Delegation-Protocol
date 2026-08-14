@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vdp.dev/spec/vdp-spec-0.3/policy-artifact.schema.json",
+  "title": "VDP Policy Artifact",
+  "description": "Canonical form of a compiled policy phi. SPEC.md section 2.4. This is the object whose canonical JSON serialization (sort_keys, no whitespace, UTF-8) is SHA-256'd to produce policy_hash.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "counters", "clauses"],
+  "properties": {
+    "version": {
+      "description": "AST shape version. 2 denotes the shape defined in SPEC.md section 2.3 (spec revision vdp-spec-0.3), which added counterDecl.counting (section 2.1a). A monitor MUST refuse a version it does not recognize -- in particular MUST NOT default a missing 'counting' key rather than refusing version 1.",
+      "const": 2
+    },
+    "counters": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/counterDecl" }
+    },
+    "clauses": {
+      "type": "array",
+      "minItems": 1,
+      "description": "An empty policy is rejected at construction (SPEC.md section 2.3) — it authorizes nothing coherently.",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/capClause" },
+          { "$ref": "#/$defs/whitelistClause" },
+          { "$ref": "#/$defs/prohibitionClause" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "ident": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "not": {
+        "enum": ["always", "and", "calls", "counter", "counting", "in", "not", "over", "per", "target"]
+      }
+    },
+    "counterDecl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "verbs", "counting", "per_target"],
+      "properties": {
+        "name": { "$ref": "#/$defs/ident" },
+        "verbs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/ident" }
+        },
+        "counting": {
+          "type": "boolean",
+          "description": "SPEC.md section 2.1a. false (default/legacy): amount-summing, a matching action contributes its amount. true: call-counting, a matching action contributes exactly 1."
+        },
+        "per_target": {
+          "type": "boolean",
+          "description": "SPEC.md section 2.1b. false (default/legacy): one global running total. true: an independent running total per target -- the bound applies to each target separately."
+        }
+      }
+    },
+    "capClause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "counter", "bound", "unit"],
+      "properties": {
+        "kind": { "const": "cap" },
+        "counter": { "$ref": "#/$defs/ident" },
+        "bound": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Minor units (cents, watt-hours, bytes, ...). Never a float."
+        },
+        "unit": {
+          "description": "Display only. MUST NOT affect any decision.",
+          "oneOf": [{ "$ref": "#/$defs/ident" }, { "type": "null" }]
+        }
+      }
+    },
+    "whitelistClause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "verb", "allowed"],
+      "properties": {
+        "kind": { "const": "whitelist" },
+        "verb": { "$ref": "#/$defs/ident" },
+        "allowed": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "not": { "const": "" },
+            "description": "The empty string is the reserved NO_TARGET sentinel and cannot be whitelisted."
+          }
+        }
+      }
+    },
+    "prohibitionClause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "verb"],
+      "properties": {
+        "kind": { "const": "prohibition" },
+        "verb": { "$ref": "#/$defs/ident" }
+      }
+    }
+  }
+}

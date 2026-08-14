@@ -1,0 +1,213 @@
+{
+  "$comment": "VDP conformance vectors for call-counting counters, spec revision vdp-spec-0.3 (SPEC.md section 2.1a). Same replay procedure as basic-policy.vectors.json: state tuple order follows policy.counters declaration order. These vectors specifically exercise counting: true, where a matching action contributes exactly 1 to the counter regardless of amount, and demonstrate that an amount-summing and a call-counting counter over the SAME verb advance independently.",
+  "spec_version": "vdp-spec-0.3",
+  "vectors": [
+    {
+      "name": "counting_counter_ignores_amount",
+      "description": "Three calls with amounts 0, 3, 1 against a call-counting counter capped at 3. An amount-summing counter with the same bound would already block on the third call (0+3+1=4 > 3); this one does not, because each call contributes exactly 1. A 4th call of any amount, including 0, is then blocked purely on call count.",
+      "policy": {
+        "version": 2,
+        "counters": [
+          {
+            "name": "checks",
+            "verbs": [
+              "check_status"
+            ],
+            "counting": true,
+            "per_target": false
+          }
+        ],
+        "clauses": [
+          {
+            "kind": "cap",
+            "counter": "checks",
+            "bound": 3,
+            "unit": null
+          }
+        ]
+      },
+      "policy_notes": {
+        "q0": [
+          0
+        ],
+        "c_max": 3
+      },
+      "steps": [
+        {
+          "action": {
+            "verb": "check_status",
+            "target": "",
+            "amount": 0
+          },
+          "expect": {
+            "decision": "ALLOW",
+            "pre_state": [
+              0
+            ],
+            "post_state": [
+              1
+            ]
+          }
+        },
+        {
+          "action": {
+            "verb": "check_status",
+            "target": "",
+            "amount": 3
+          },
+          "expect": {
+            "decision": "ALLOW",
+            "pre_state": [
+              1
+            ],
+            "post_state": [
+              2
+            ]
+          }
+        },
+        {
+          "action": {
+            "verb": "check_status",
+            "target": "",
+            "amount": 1
+          },
+          "expect": {
+            "decision": "ALLOW",
+            "pre_state": [
+              2
+            ],
+            "post_state": [
+              3
+            ]
+          }
+        },
+        {
+          "action": {
+            "verb": "check_status",
+            "target": "",
+            "amount": 0
+          },
+          "expect": {
+            "decision": "BLOCK",
+            "pre_state": [
+              3
+            ],
+            "post_state": [
+              3
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "amount_summing_and_counting_counters_over_the_same_verb",
+      "description": "Two counters both declared over {pay}: spend (amount-summing, cap 1000) and pay_calls (call-counting, cap 2). State tuple order is [spend, pay_calls]. The two counters advance independently per action -- spend by amount, pay_calls by 1 -- and either one blocking is enough to block the action.",
+      "policy": {
+        "version": 2,
+        "counters": [
+          {
+            "name": "spend",
+            "verbs": [
+              "pay"
+            ],
+            "counting": false,
+            "per_target": false
+          },
+          {
+            "name": "pay_calls",
+            "verbs": [
+              "pay"
+            ],
+            "counting": true,
+            "per_target": false
+          }
+        ],
+        "clauses": [
+          {
+            "kind": "cap",
+            "counter": "spend",
+            "bound": 1000,
+            "unit": null
+          },
+          {
+            "kind": "cap",
+            "counter": "pay_calls",
+            "bound": 2,
+            "unit": null
+          },
+          {
+            "kind": "whitelist",
+            "verb": "pay",
+            "allowed": [
+              "alice"
+            ]
+          }
+        ]
+      },
+      "policy_notes": {
+        "q0": [
+          0,
+          0
+        ],
+        "c_max": 1000
+      },
+      "steps": [
+        {
+          "action": {
+            "verb": "pay",
+            "target": "alice",
+            "amount": 100
+          },
+          "expect": {
+            "decision": "ALLOW",
+            "pre_state": [
+              0,
+              0
+            ],
+            "post_state": [
+              100,
+              1
+            ]
+          }
+        },
+        {
+          "action": {
+            "verb": "pay",
+            "target": "alice",
+            "amount": 100
+          },
+          "expect": {
+            "decision": "ALLOW",
+            "pre_state": [
+              100,
+              1
+            ],
+            "post_state": [
+              200,
+              2
+            ]
+          }
+        },
+        {
+          "action": {
+            "verb": "pay",
+            "target": "alice",
+            "amount": 1
+          },
+          "expect": {
+            "decision": "BLOCK",
+            "pre_state": [
+              200,
+              2
+            ],
+            "post_state": [
+              200,
+              2
+            ],
+            "note": "spend has headroom (201 <= 1000) but pay_calls is exhausted (2/2); either gate blocking is enough."
+          }
+        }
+      ]
+    }
+  ]
+}

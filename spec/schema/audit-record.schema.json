@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vdp.dev/spec/vdp-spec-0.3/audit-record.schema.json",
+  "title": "VDP Audit Log Record",
+  "description": "One line of the append-only, hash-chained JSONL audit log. SPEC.md section 6.1. On disk, records MUST be serialized with ensure_ascii=true — see SPEC.md section 6.1 for why.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "seq", "action", "symbol", "pre_state", "post_state",
+    "decision", "reason", "token_id", "policy_hash", "prev_hash",
+    "hash", "sig"
+  ],
+  "properties": {
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Contiguous from 0. Ordering comes from this and the hash chain, never from a timestamp — no record contains one."
+    },
+    "action": {
+      "type": "object",
+      "description": "The raw ConcreteAction as submitted, before abstraction. Values that are not JSON scalars are stored as their repr() so an unserializable payload cannot corrupt the log.",
+      "required": ["verb", "target", "amount", "attrs"],
+      "properties": {
+        "verb": {},
+        "target": {},
+        "amount": {},
+        "attrs": { "type": "object" }
+      }
+    },
+    "symbol": {
+      "type": "object",
+      "description": "The abstracted Sigma symbol alpha(action) actually decided on.",
+      "additionalProperties": false,
+      "required": ["verb", "target", "amount"],
+      "properties": {
+        "verb": { "type": "string" },
+        "target": { "type": "string" },
+        "amount": { "type": "integer" }
+      }
+    },
+    "pre_state": {
+      "type": "array",
+      "description": "Counter valuations before this action, in Policy.counters order. [\"q_bad\"] if the automaton was already absorbed (does not occur in practice: a BLOCK never advances state).",
+      "items": {}
+    },
+    "post_state": {
+      "type": "array",
+      "description": "Counter valuations after. Equal to pre_state when decision is BLOCK.",
+      "items": {}
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["ALLOW", "BLOCK"]
+    },
+    "reason": {
+      "type": "string",
+      "description": "Human-readable reason for the decision. Empty string permitted on ALLOW."
+    },
+    "token_id": {
+      "type": "string",
+      "description": "Stable identifier for the token's scope chain (SPEC.md section 5.5), or the literal sentinel \"<no-token>\" when no token was presented. Exempt from the 64-hex-character requirement below."
+    },
+    "policy_hash": { "$ref": "#/$defs/hex64" },
+    "prev_hash": { "$ref": "#/$defs/hex64" },
+    "hash": { "$ref": "#/$defs/hex64" },
+    "sig": { "$ref": "#/$defs/hex64" }
+  },
+  "$defs": {
+    "hex64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 or HMAC-SHA256 output, hex. Validated as exactly 64 lowercase hex characters on parse, not just type-checked — SPEC.md section 6.1 explains why (a non-hex value reaching hmac.compare_digest can raise instead of returning false)."
+    }
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vdp.dev/spec/vdp-spec-0.3/token.schema.json",
+  "title": "VDP Attenuable Capability Token",
+  "description": "Wire format of a token: (S_0, [C_1 .. C_n], t_n), bound to policy_hash. SPEC.md section 5.5. Structural validity (this schema) is NOT the same as cryptographic validity — a well-formed token still requires HMAC chain verification against the root key (SPEC.md section 5.3).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["root", "caveats", "tag", "policy_hash"],
+  "properties": {
+    "root": { "$ref": "#/$defs/scope" },
+    "caveats": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/scope" }
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^[0-9a-f]+$",
+      "description": "Hex-encoded HMAC-SHA256 output over policy_hash, the root scope, and the caveat chain (SPEC.md section 5.3)."
+    },
+    "policy_hash": {
+      "type": "string",
+      "description": "SPEC.md section 5.1a. \"\" (default/legacy, vdp-spec-0.2): unbound -- verifies under any policy sharing the root key. A non-empty value binds this ROOT token's tag to that specific policy artifact's policy_hash; tampering with this field invalidates the tag, same as any other forgery attempt."
+    }
+  },
+  "$defs": {
+    "scope": {
+      "title": "Scope",
+      "description": "A point in the meet-semilattice (SPEC.md section 5.1). null means TOP ('constrains nothing'), the identity for meet.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verbs", "targets", "max_amount", "max_total", "expires_at"],
+      "properties": {
+        "verbs": {
+          "description": "Finite verb set, or null for TOP (unrestricted). A root scope MUST NOT leave both verbs and targets at TOP.",
+          "oneOf": [
+            { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            { "type": "null" }
+          ]
+        },
+        "targets": {
+          "oneOf": [
+            { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            { "type": "null" }
+          ]
+        },
+        "max_amount": {
+          "description": "Per-action amount ceiling, minor units, or null for unbounded.",
+          "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+        },
+        "max_total": {
+          "description": "Cumulative ceiling for this token specifically (distinct from the monitor's own counter). A root token MUST leave this at null/TOP.",
+          "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+        },
+        "expires_at": {
+          "description": "Unix epoch second, or null for never. No formatted date strings.",
+          "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+        }
+      }
+    }
+  }
+}

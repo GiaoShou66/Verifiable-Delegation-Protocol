@@ -1,0 +1,105 @@
+{
+  "$comment": "VDP conformance vectors, spec revision vdp-spec-0.3. Language-agnostic: SPEC.md section 10. Each vector replays a sequence of actions against `policy` from q0 = (0, 0) (state tuple order follows policy.counters declaration order: [spend, checks]) and asserts the automaton's per-step decision and state. A conforming implementation MUST reproduce every `expect` block exactly. Both counters here are amount-summing (counting: false) -- see counting-counters.vectors.json for call-counting semantics (SPEC.md section 2.1a).",
+  "spec_version": "vdp-spec-0.3",
+  "policy": {
+    "version": 2,
+    "counters": [
+      { "name": "spend", "verbs": ["pay"], "counting": false, "per_target": false },
+      { "name": "checks", "verbs": ["check_status"], "counting": false, "per_target": false }
+    ],
+    "clauses": [
+      { "kind": "cap", "counter": "spend", "bound": 100, "unit": null },
+      { "kind": "cap", "counter": "checks", "bound": 1000, "unit": null },
+      { "kind": "whitelist", "verb": "pay", "allowed": ["alice", "bob"] },
+      { "kind": "prohibition", "verb": "delete_account" }
+    ]
+  },
+  "policy_notes": {
+    "V": ["pay", "check_status", "delete_account"],
+    "T": ["", "alice", "bob"],
+    "c_max": 1000,
+    "q0": [0, 0]
+  },
+  "vectors": [
+    {
+      "name": "whitelist_violation",
+      "description": "pay to a target outside the whitelist. Target is not in T at all, so alpha sinks it before delta runs (fail-closed, unconditional).",
+      "steps": [
+        {
+          "action": { "verb": "pay", "target": "mallory", "amount": 10 },
+          "expect": { "decision": "BLOCK", "pre_state": [0, 0], "post_state": [0, 0] }
+        }
+      ]
+    },
+    {
+      "name": "prohibited_verb",
+      "description": "delete_account is an unconditional hard prohibition.",
+      "steps": [
+        {
+          "action": { "verb": "delete_account", "target": "", "amount": 0 },
+          "expect": { "decision": "BLOCK", "pre_state": [0, 0], "post_state": [0, 0] }
+        }
+      ]
+    },
+    {
+      "name": "unknown_verb",
+      "description": "A verb never named in phi. Not in V, so alpha sinks it.",
+      "steps": [
+        {
+          "action": { "verb": "wire_transfer", "target": "", "amount": 0 },
+          "expect": { "decision": "BLOCK", "pre_state": [0, 0], "post_state": [0, 0] }
+        }
+      ]
+    },
+    {
+      "name": "cumulative_cap_then_resume",
+      "description": "The spend counter is monotone and cumulative: a BLOCK leaves state unchanged, and a later action that fits the remaining headroom is still allowed. Demonstrates a block does not poison the counter, and that splitting cannot beat a cumulative cap.",
+      "steps": [
+        {
+          "action": { "verb": "pay", "target": "alice", "amount": 60 },
+          "expect": { "decision": "ALLOW", "pre_state": [0, 0], "post_state": [60, 0] }
+        },
+        {
+          "action": { "verb": "pay", "target": "bob", "amount": 60 },
+          "expect": { "decision": "BLOCK", "pre_state": [60, 0], "post_state": [60, 0] }
+        },
+        {
+          "action": { "verb": "pay", "target": "bob", "amount": 40 },
+          "expect": { "decision": "ALLOW", "pre_state": [60, 0], "post_state": [100, 0] }
+        },
+        {
+          "action": { "verb": "pay", "target": "alice", "amount": 1 },
+          "expect": { "decision": "BLOCK", "pre_state": [100, 0], "post_state": [100, 0] }
+        }
+      ]
+    },
+    {
+      "name": "no_target_verb_unrestricted_target",
+      "description": "check_status has a counter but no whitelist clause, so any target in T is accepted for it (whitelist clauses constrain only their own verb) — including NO_TARGET (the empty string) and a target that only appears in pay's whitelist.",
+      "steps": [
+        {
+          "action": { "verb": "check_status", "target": "", "amount": 0 },
+          "expect": { "decision": "ALLOW", "pre_state": [0, 0], "post_state": [0, 0] }
+        },
+        {
+          "action": { "verb": "check_status", "target": "alice", "amount": 0 },
+          "expect": { "decision": "ALLOW", "pre_state": [0, 0], "post_state": [0, 0] }
+        }
+      ]
+    },
+    {
+      "name": "amount_saturation_and_negative",
+      "description": "A negative amount and an amount above c_max (1000) both saturate to the out-of-range sink, independent of any per-counter bound.",
+      "steps": [
+        {
+          "action": { "verb": "pay", "target": "alice", "amount": -5 },
+          "expect": { "decision": "BLOCK", "pre_state": [0, 0], "post_state": [0, 0] }
+        },
+        {
+          "action": { "verb": "pay", "target": "alice", "amount": 5000 },
+          "expect": { "decision": "BLOCK", "pre_state": [0, 0], "post_state": [0, 0] }
+        }
+      ]
+    }
+  ]
+}
