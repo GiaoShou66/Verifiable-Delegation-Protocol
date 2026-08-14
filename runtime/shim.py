@@ -50,6 +50,8 @@ implementation does about it. Memory isolation is NOT claimed. DESIGN.md 7.5.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Callable, Mapping
@@ -60,7 +62,15 @@ from policy.ast import NO_TARGET
 from runtime.auditlog import AuditLog, Record
 from tokens.macaroon import Token, verify
 
-__all__ = ["AgentShim", "Outcome", "ShimError", "ToolSpec"]
+__all__ = [
+    "AgentShim",
+    "Outcome",
+    "ShimError",
+    "ToolSpec",
+    "artifact_hash",
+    "canonical_tool_table",
+    "tool_table_hash",
+]
 
 
 class ShimError(ValueError):
@@ -159,10 +169,64 @@ def _unmappable(tool_name: object, args: object) -> ConcreteAction:
     return ConcreteAction(verb=None, target=NO_TARGET, amount=0, attrs=attrs)
 
 
+def canonical_tool_table(tools: Mapping[str, "ToolSpec"]) -> bytes:
+    """Deterministic bytes for a tool mapping table.
+
+    Canonical JSON: sorted tool names, sorted keys, no whitespace -- same
+    shape discipline as `Policy.canonical()` and `Scope.canonical()`. This is
+    the "meaning" half of a policy artifact that DESIGN.md section 1.1
+    describes but that a bare `policy_hash` cannot cover: `attrs` never
+    reaches the automaton, so whatever maps a tool name to (verb, target,
+    amount) is exactly as load-bearing as phi itself, and has to be
+    independently checkable.
+    """
+    obj = {
+        name: {
+            "verb": spec.verb,
+            "target_arg": spec.target_arg,
+            "amount_arg": spec.amount_arg,
+            "fixed_target": spec.fixed_target,
+            "fixed_amount": spec.fixed_amount,
+        }
+        for name, spec in sorted(dict(tools).items())
+    }
+    return json.dumps(
+        obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def tool_table_hash(tools: Mapping[str, "ToolSpec"]) -> str:
+    """SHA-256 hex of `canonical_tool_table`."""
+    return hashlib.sha256(canonical_tool_table(tools)).hexdigest()
+
+
+def artifact_hash(policy_hash: str, tools: Mapping[str, "ToolSpec"]) -> str:
+    """SHA-256 hex binding a policy_hash to a specific tool mapping table.
+
+    This is the value an integrator SHOULD record alongside `policy_hash` at
+    the confirmation gate (DESIGN.md section 2.6) if they want a human's
+    confirmation to be provably tied to the exact table wired into the shim,
+    not just to phi. `policy.confirm` does not compute this itself -- L1
+    never imports L4 (see that module's docstring) -- so producing and
+    displaying it is the caller's responsibility.
+    """
+    return hashlib.sha256(
+        policy_hash.encode("utf-8") + b"\x00" + canonical_tool_table(tools)
+    ).hexdigest()
+
+
 class AgentShim:
     """Mediates every tool call. The agent sees `call()` and nothing else."""
 
-    __slots__ = ("_monitor", "_tools", "_log", "_root_key", "_executor", "_spent")
+    __slots__ = (
+        "_monitor",
+        "_tools",
+        "_log",
+        "_root_key",
+        "_executor",
+        "_spent",
+        "_artifact_hash",
+    )
 
     def __init__(
         self,
@@ -171,7 +235,19 @@ class AgentShim:
         log: AuditLog,
         root_key: bytes,
         executor: Callable[[str, Mapping], object] | None = None,
+        *,
+        expected_artifact_hash: str | None = None,
     ) -> None:
+        """
+        `expected_artifact_hash`: optional. If given, construction FAILS
+        unless it equals `artifact_hash(monitor.policy.digest(), tools)` --
+        the same check the log's own policy_hash gets (`log.policy_hash !=
+        monitor.policy.digest()` below), but for the tool table. Omit it (the
+        default) to skip this check entirely; existing callers that never
+        pass it are unaffected. Passing it is how an integrator makes "the
+        table wired into this shim is the exact one shown at confirmation" a
+        checked fact instead of an assumption.
+        """
         if not isinstance(monitor, Monitor):
             raise ShimError(f"expected a Monitor, got {type(monitor).__name__}")
         if not isinstance(log, AuditLog):
@@ -192,14 +268,35 @@ class AgentShim:
                 )
             table[name] = spec
 
+        computed_artifact_hash = artifact_hash(monitor.policy.digest(), table)
+        if (
+            expected_artifact_hash is not None
+            and expected_artifact_hash != computed_artifact_hash
+        ):
+            raise ShimError(
+                "the tool table does not match expected_artifact_hash; it may "
+                "not be the table the human confirmed"
+            )
+
         self._monitor = monitor
         self._tools = MappingProxyType(table)
         self._log = log
         self._root_key = bytes(root_key)
         self._executor = executor
         self._spent: dict[str, int] = {}
+        self._artifact_hash = computed_artifact_hash
 
     # --- operator-facing views. NOT part of the agent's surface. ---
+
+    @property
+    def artifact_hash(self) -> str:
+        """SHA-256 binding this shim's policy_hash to its exact tool table.
+
+        Record this (not bare `policy_hash`) if you want to detect, after
+        the fact, that the table an agent was actually mediated against
+        differs from the one shown at confirmation.
+        """
+        return self._artifact_hash
 
     @property
     def policy_hash(self) -> str:

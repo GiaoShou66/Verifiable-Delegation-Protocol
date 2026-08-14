@@ -223,6 +223,55 @@ def test_a_log_opened_under_another_policy_is_refused(tmp_path, phi):
         AgentShim(Monitor(phi), TOOLS, log, ROOT_KEY)
 
 
+def test_artifact_hash_binds_policy_hash_to_the_exact_tool_table(tmp_path, phi):
+    """DESIGN.md 1.1: the mapping table decides what an amount MEANS, so its
+    integrity matters as much as phi's. artifact_hash makes that checkable."""
+    from runtime.shim import artifact_hash, tool_table_hash
+
+    log = AuditLog(tmp_path / "a.jsonl", phi.digest(), LOG_KEY)
+    shim = AgentShim(Monitor(phi), TOOLS, log, ROOT_KEY)
+    assert shim.artifact_hash == artifact_hash(phi.digest(), TOOLS)
+    # Same policy, a DIFFERENT table -- e.g. amount_arg swapped to "dollars"
+    # instead of "cents", the exact silent-100x-underauthorization scenario
+    # -- must produce a different artifact_hash.
+    swapped = {
+        "pay_bill": ToolSpec(verb="pay", target_arg="recipient", amount_arg="dollars"),
+        "close_account": ToolSpec(verb="delete_account"),
+    }
+    assert artifact_hash(phi.digest(), swapped) != shim.artifact_hash
+    assert tool_table_hash(swapped) != tool_table_hash(TOOLS)
+
+
+def test_expected_artifact_hash_is_optional_and_backward_compatible(tmp_path, phi):
+    log = AuditLog(tmp_path / "a.jsonl", phi.digest(), LOG_KEY)
+    # Omitting it entirely is unaffected -- the default construction path.
+    AgentShim(Monitor(phi), TOOLS, log, ROOT_KEY)
+
+
+def test_expected_artifact_hash_rejects_a_mismatched_table(tmp_path, phi):
+    from runtime.shim import artifact_hash
+
+    wrong_hash = artifact_hash(phi.digest(), {})
+    log = AuditLog(tmp_path / "a2.jsonl", phi.digest(), LOG_KEY)
+    with pytest.raises(ShimError, match="expected_artifact_hash"):
+        AgentShim(
+            Monitor(phi),
+            TOOLS,
+            log,
+            ROOT_KEY,
+            expected_artifact_hash=wrong_hash,
+        )
+
+
+def test_expected_artifact_hash_accepts_a_matching_table(tmp_path, phi):
+    from runtime.shim import artifact_hash
+
+    log = AuditLog(tmp_path / "a3.jsonl", phi.digest(), LOG_KEY)
+    correct_hash = artifact_hash(phi.digest(), TOOLS)
+    shim = AgentShim(
+        Monitor(phi), TOOLS, log, ROOT_KEY, expected_artifact_hash=correct_hash
+    )
+    assert shim.artifact_hash == correct_hash
 def test_an_executor_that_raises_does_not_roll_the_counter_back(tmp_path, phi, token):
     def boom(name, args):
         raise RuntimeError("the bank said no")
