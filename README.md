@@ -84,13 +84,13 @@ flowchart TD
 
 ## Quickstart
 
-Requires Python 3.11+. Test-only dependencies: `pytest`, `hypothesis`.
-Optional: `cryptography`, only if you use `runtime.attest.Ed25519Attestor`
-(everything else, including the whole enforcement path, is standard-library
-only).
+Requires Python 3.11+. The enforcement path is standard-library only, so
+installing VDP pulls in nothing. Optional extras: `test` (`pytest`,
+`hypothesis`), `attest` (`cryptography`, needed only for
+`runtime.attest.Ed25519Attestor`).
 
 ```bash
-pip install pytest hypothesis
+pip install -e ".[test]"        # or: pip install -e ".[dev,attest]"
 
 # A well-behaved agent doing its job within bounds:
 python -m demo.payment_agent
@@ -118,7 +118,15 @@ runtime/    shim.py  auditlog.py  attest.py  server.py  client.py
 demo/       payment_agent.py  hostile_agent.py
 tests/      test_policy.py  test_monitor.py  test_tokens.py  test_runtime.py
             test_properties.py  test_adversarial.py  test_server.py  test_attest.py
+            test_conformance.py  test_hardening.py
 ```
+
+`test_conformance.py` replays the portable vectors in
+[`spec/conformance/`](spec/conformance/) — the same fixtures SPEC.md §10
+gives a second implementation — so this implementation is held to its own
+published artifacts. `test_hardening.py` covers what a hostile peer or a
+crash reaches: request-line bounds, connection timeouts and caps, and that a
+record is on disk before `append()` returns.
 
 ## Documentation
 

@@ -11,7 +11,6 @@ import pytest
 
 from policy.parser import parse
 from runtime.attest import Attestation, AttestError, Ed25519Attestor
-from runtime.auditlog import genesis_hash
 
 ed25519 = pytest.importorskip(
     "cryptography.hazmat.primitives.asymmetric.ed25519",
@@ -82,7 +81,7 @@ def test_verify_is_total_and_never_raises_on_hostile_evidence():
 
 
 def test_construction_requires_at_least_one_key():
-    with pytest.raises(ValueError, match="private_key.*public_key.*or both"):
+    with pytest.raises(ValueError, match=r"private_key.*public_key.*or both"):
         Ed25519Attestor()
 
 
@@ -95,7 +94,7 @@ def test_construction_rejects_the_wrong_key_type():
 
 
 def test_public_key_is_derived_from_private_key_when_omitted():
-    private, public = _keypair()
+    private, _public = _keypair()
     signer = Ed25519Attestor(private_key=private)
     attestation = signer.attest([], PHI)
     # The SAME instance can verify its own attestation without an explicit

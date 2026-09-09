@@ -94,9 +94,13 @@ class WorstCase:
         out: list[str] = []
 
         for item in self.counters:
+            # B023 is suppressed, not fixed: the closure captures `item`, but
+            # it is CALLED inside this same iteration and never stored, so
+            # there is no deferred binding to get wrong. Binding eagerly would
+            # add a parameter that exists only to satisfy a linter.
             unit_of = (
                 (lambda v: f"{v:,} call(s)") if item.counting
-                else (lambda v: format_amount(v, item.unit))
+                else (lambda v: format_amount(v, item.unit))  # noqa: B023
             )
             if item.per_target:
                 out.append(

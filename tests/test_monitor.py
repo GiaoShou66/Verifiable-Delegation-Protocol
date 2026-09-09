@@ -345,7 +345,7 @@ def test_counters_are_monotone_non_decreasing(data):
     previous = monitor.state
     for action in actions:
         monitor.submit(action)
-        assert all(new >= old for new, old in zip(monitor.state, previous))
+        assert all(new >= old for new, old in zip(monitor.state, previous, strict=True))
         previous = monitor.state
 
 

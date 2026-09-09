@@ -1,0 +1,177 @@
+# CI for VDP.
+#
+# Why this exists: SPEC.md invites second implementations and SECURITY.md asks
+# people to trust an enforcement path. Neither is credible from a repository
+# where nobody can watch the tests pass. Every job here checks a claim the
+# documentation makes.
+#
+# Windows is a first-class target, not an afterthought: runtime/server.py
+# chose TCP loopback over AF_UNIX specifically because this project runs on
+# Windows, and runtime/auditlog.py's directory fsync is a documented no-op
+# there. Both are claims only a Windows runner keeps honest.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (with the optional attestation extra)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test,attest]"
+
+      - name: Run the test suite
+        run: python -m pytest
+
+      - name: Assert the enforcement path imports nothing third-party
+        # The standard-library-only claim (README, SPEC.md section 0) is
+        # load-bearing and easy to break by accident. `cryptography` IS
+        # installed in this job, so an accidental import would otherwise
+        # succeed in silence. This fails it at the import hook instead.
+        shell: python
+        run: |
+          import builtins
+
+          BANNED = {"cryptography", "nacl", "pytest", "hypothesis"}
+          real_import = builtins.__import__
+
+
+          def guard(name, *args, **kwargs):
+              if name.split(".")[0] in BANNED:
+                  raise AssertionError(
+                      f"enforcement path imported {name!r}; SPEC.md section 0 "
+                      "says it is standard library only"
+                  )
+              return real_import(name, *args, **kwargs)
+
+
+          builtins.__import__ = guard
+          try:
+              import monitor  # noqa: F401
+              import policy  # noqa: F401
+              import runtime.auditlog  # noqa: F401
+              import runtime.client  # noqa: F401
+              import runtime.server  # noqa: F401
+              import runtime.shim  # noqa: F401
+              import tokens  # noqa: F401
+          finally:
+              builtins.__import__ = real_import
+          print("enforcement path is standard library only")
+
+      - name: Run the demos end to end
+        # README's quickstart is these two commands. A quickstart that does not
+        # run is a broken front door.
+        run: |
+          python -m demo.payment_agent
+          python -m demo.hostile_agent
+
+  lint:
+    name: ruff + mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,attest]"
+
+      - name: ruff
+        run: ruff check .
+
+      # NOT a gate yet, and deliberately not faked into one. There are 21
+      # standing errors, almost all the same shape: `State` is
+      # `tuple[int, ...] | _Bad`, callers narrow it with `not is_bad(q)` and
+      # then index, and narrowing a union on the NEGATIVE branch needs
+      # `typing.TypeIs` (3.13+) while this package supports 3.11. Suppressing
+      # them per-line, or dropping mypy, would both hide the same real gap --
+      # so it runs, it is visible, and it does not block. Making it blocking
+      # is tracked work with a known first move.
+      - name: mypy (advisory -- see comment)
+        run: mypy policy monitor tokens runtime
+        continue-on-error: true
+
+  schema:
+    name: wire-format schemas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]" jsonschema
+
+      - name: Check every shipped JSON Schema is a valid schema
+        # SPEC.md section 10 ships these for other implementations to code
+        # against. A schema nobody validates is documentation that rots in
+        # silence.
+        shell: python
+        run: |
+          import json
+          import pathlib
+
+          import jsonschema
+
+          paths = sorted(pathlib.Path("spec/schema").glob("*.json"))
+          assert paths, "no schemas found under spec/schema"
+          for path in paths:
+              jsonschema.Draft202012Validator.check_schema(
+                  json.loads(path.read_text(encoding="utf-8"))
+              )
+              print(f"{path}: ok")
+
+  build:
+    name: build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build and check the distribution
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vdp-dist
+          path: dist/

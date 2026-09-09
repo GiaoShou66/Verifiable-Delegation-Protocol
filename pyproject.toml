@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vdp"
+version = "0.3.0"
+description = "Verifiable Delegation Protocol — reference implementation of vdp-spec-0.3"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["capability", "delegation", "runtime-monitor", "macaroon", "llm-agent", "safety"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+
+# The enforcement path is standard library only, on purpose (README, SPEC.md
+# section 0). That is a property worth being able to point at, so it is stated
+# here too: installing `vdp` pulls in nothing.
+dependencies = []
+
+[project.optional-dependencies]
+# Ed25519 checkpoint attestation (SPEC.md section 6.4) is the ONLY thing that
+# reaches outside the standard library. It is imported lazily and is never on
+# a decision path.
+attest = ["cryptography>=42"]
+test = ["pytest>=8", "hypothesis>=6.100"]
+dev = ["pytest>=8", "hypothesis>=6.100", "ruff>=0.6", "mypy>=1.11"]
+
+[tool.setuptools]
+# Flat layout, listed explicitly rather than auto-discovered: `demo` ships
+# because README's quickstart runs it; `tests` and `spec` do not (the
+# conformance vectors are repository artifacts for OTHER implementations,
+# reached from a checkout, not from site-packages).
+packages = ["policy", "monitor", "tokens", "runtime", "demo"]
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# --strict-markers turns a typo in a marker name into an error rather than a
+# silently skipped test.
+addopts = "-q --strict-markers --strict-config"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 90
+
+[tool.ruff.lint]
+# Deliberately a DEFECT gate, not a style gate. Every rule here can flag
+# something that changes behavior; the stylistic families are left off rather
+# than switched on and then suppressed file by file. This codebase carries
+# spec-section references in its formatting and docstrings, and a lint rule
+# that would rewrite those buys nothing a reviewer wanted.
+select = [
+    "E9",   # syntax / IO errors only -- not the whitespace half of pycodestyle
+    "F",    # pyflakes: undefined names, unused imports, real mistakes
+    "B",    # bugbear: mutable defaults, loop-variable capture, silent zip
+    "S",    # bandit -- this is security-relevant code
+    "RUF",
+]
+ignore = [
+    "S101",    # pytest is built on assert
+    "RUF005",  # concatenation vs unpacking: style, not behavior
+    "RUF022",  # __all__ sort order: style
+    "RUF023",  # __slots__ sort order: style
+]
+
+[tool.ruff.lint.per-file-ignores]
+"demo/*" = ["S104"]
+"tests/*" = ["S105", "S106", "S311"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+warn_redundant_casts = true
+no_implicit_optional = true
+strict_equality = true
+# Not `strict = true`: these modules deliberately accept `object` at every
+# boundary an agent controls, because SPEC.md section 1.2 requires alpha to be
+# TOTAL -- a hostile type must be a VALUE that gets refused, not a type error
+# that never compiles. Tightening this is tracked work, not a switch to flip.
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = ["cryptography.*"]
+ignore_missing_imports = true

@@ -15,6 +15,7 @@ against is the one from `test_monitor.py`, which knows nothing about any of it.
 from __future__ import annotations
 
 import itertools
+from itertools import pairwise
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
@@ -189,7 +190,7 @@ def test_delegation_depth_never_widens_anything(tmp_path, data):
         allowed_at_depth.append(call_action(shim, token, action).allowed)
 
     # Once a depth refuses the action, no deeper token may accept it.
-    for shallower, deeper in zip(allowed_at_depth, allowed_at_depth[1:]):
+    for shallower, deeper in pairwise(allowed_at_depth):
         assert shallower or not deeper
 
 
@@ -221,4 +222,4 @@ def test_the_log_replays_to_the_same_decisions_for_any_hostile_trace(tmp_path, d
             replayed = tuple(record.post_state)
 
     names = [decl.name for decl in phi.counters]
-    assert dict(zip(names, replayed)) == counters_of(shim, phi)
+    assert dict(zip(names, replayed, strict=True)) == counters_of(shim, phi)
