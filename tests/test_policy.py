@@ -524,3 +524,60 @@ def test_no_input_stream_is_a_refusal(boom):
         compiled, PREVIEW, reader=reader, writer=lambda _: None
     )
     assert result.confirmed is False
+
+
+PER_TARGET_PHI = """
+counter spend over {pay} per target
+always(spend <= 10000 cents)
+and always(pay(target) -> target in {"alice", "bob", "carol"})
+"""
+
+GLOBAL_PHI = """
+counter spend over {pay}
+always(spend <= 10000 cents)
+and always(pay(target) -> target in {"alice", "bob", "carol"})
+"""
+
+PER_TARGET_COUNTING_PHI = """
+counter c over {ping} per target counting calls
+always(c <= 5)
+and always(ping(target) -> target in {"a", "b"})
+"""
+
+
+def test_english_rendering_never_understates_a_per_target_cap():
+    """A per-target bound is not the exposure, and the plain-language
+    rendering is the line a human actually reads.
+
+    "at most $100 to any one target" with three whitelisted recipients means
+    up to $300, and reporting only the smaller number understates the total by
+    exactly the number of reachable targets -- the omission DESIGN.md section
+    4.2 names as the worst failure mode this interface has. SPEC.md section 4
+    already requires worst_case() to report both; this pins the same honesty in
+    render_english, which can be shown without the preview beside it
+    (confirm.gate_text accepts require_preview=False).
+    """
+    english = render_english(parse(PER_TARGET_PHI))
+    assert "$100.00 to any one target" in english
+    assert "$300.00" in english, (
+        "the aggregate across reachable targets must appear; showing only the "
+        f"per-target figure understates exposure 3x. Got: {english}"
+    )
+
+
+def test_english_rendering_of_a_global_cap_states_no_aggregate():
+    """The aggregate belongs ONLY to per-target counters. A global cap's bound
+    already IS the total, and multiplying it would overstate exposure -- the
+    opposite error, and just as misleading."""
+    english = render_english(parse(GLOBAL_PHI))
+    assert "$100.00 in total" in english
+    assert "across all" not in english
+    assert "$300.00" not in english
+
+
+def test_english_rendering_counts_calls_in_the_aggregate_too():
+    """Call-counting and per-target are orthogonal (SPEC.md 2.1a/2.1b), so an
+    aggregate must be expressed in calls when the counter counts calls."""
+    english = render_english(parse(PER_TARGET_COUNTING_PHI))
+    assert "5 call(s) to any one target" in english
+    assert "10 call(s) across all 2 reachable targets" in english

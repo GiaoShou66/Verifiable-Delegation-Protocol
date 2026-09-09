@@ -78,6 +78,25 @@ def render_formal(policy: Policy) -> str:
     return "\n".join(lines)
 
 
+def _reachable_targets(policy: Policy, decl) -> int:
+    """How many distinct targets this counter's verbs can actually reach.
+
+    A whitelisted verb reaches exactly its allowed set. A verb with no
+    whitelist reaches every target in T, which is the honest count to
+    multiply a per-target bound by. Matches what `monitor.worstcase` computes
+    for the same purpose; kept here rather than imported because `policy`
+    imports nothing from `monitor` -- the layering is one-directional
+    (policy/__init__.py).
+    """
+    reachable: set[str] = set()
+    for verb in decl.verbs:
+        whitelist = policy.whitelist_for(verb)
+        if whitelist is None:
+            return len(policy.targets)
+        reachable |= set(whitelist.allowed)
+    return len(reachable)
+
+
 def _cap_limits(policy: Policy, verb: str) -> list[str]:
     out: list[str] = []
     for decl in policy.counters_for_verb(verb):
@@ -91,7 +110,27 @@ def _cap_limits(policy: Policy, verb: str) -> list[str]:
         unit_text = f"{cap.bound:,} call(s)" if decl.counting else format_amount(
             cap.bound, cap.unit
         )
-        out.append(f'at most {unit_text}{per} ({kind} "{decl.name}"{together})')
+        aggregate = ""
+        if decl.per_target:
+            # A per-target bound is NOT the exposure. With N reachable targets
+            # the policy permits N times this number, and saying only the
+            # per-target figure understates the total by exactly that factor --
+            # the omission DESIGN.md section 4.2 calls the worst failure mode
+            # this interface has. worst_case() already reports both (SPEC.md
+            # section 4 requires it); this line is why the plain-language
+            # rendering cannot be read as the smaller promise when someone
+            # shows it without the preview beside it.
+            reachable = _reachable_targets(policy, decl)
+            if reachable > 1:
+                total = f"{cap.bound * reachable:,} call(s)" if decl.counting else (
+                    format_amount(cap.bound * reachable, cap.unit)
+                )
+                aggregate = (
+                    f", so up to {total} across all {reachable} reachable targets"
+                )
+        out.append(
+            f'at most {unit_text}{per} ({kind} "{decl.name}"{together}){aggregate}'
+        )
     return out
 
 
