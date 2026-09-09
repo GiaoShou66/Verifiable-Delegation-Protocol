@@ -815,6 +815,24 @@ know whether the monitor was consulted at all.
 {"ok": false, "error": <string>}
 ```
 
+**`now`, and who is allowed to supply it.** `expires_at` (§5.1) is checked
+against a `now` that `Scope.permits` receives as an argument, because nothing
+in the token layer reads a clock. Over a transport, something must supply it,
+and the request shape above carries a `now` field for that purpose.
+
+An implementation MUST NOT decide expiry from a `now` supplied by an
+untrusted peer. §7 places the agent outside the TCB and states that it may
+lie in every field it controls; over this binding `now` is such a field, so
+believing it means an agent holding a long-expired token sends `now: 0` and
+the check passes. That is not a weakened bound — `expires_at` stops
+constraining anything at all. A conforming server SHOULD read its own clock
+and ignore the request's `now`, which is what the reference implementation
+does by default (`MonitorServer(clock=time.time)`); the field remains part of
+the request shape for compatibility and MAY still be parsed, but MUST NOT be
+the basis of an expiry decision unless the peer is trusted, which for an
+agent it is not. An implementation that does trust it MUST say so, and MUST
+NOT describe `expires_at` as a bound against the §7 adversary.
+
 A malformed `token` object MUST be handled as a BLOCK with `gate: "token"`
 (reusing §5.4's ordinary token-gate refusal shape), not as a protocol-level
 `ok: false` — a hostile or corrupted token is exactly the kind of input

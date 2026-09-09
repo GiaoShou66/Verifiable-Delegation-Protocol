@@ -340,3 +340,93 @@ def test_verify_reports_a_corrupt_line_instead_of_raising(tmp_path, phi):
     assert result.ok is False
     assert any("unreadable" in problem for problem in result.problems)
     assert result.tail_truncation_undetectable is True
+
+
+# --------------------------------------------------------------------------
+# Who decides what time it is
+# --------------------------------------------------------------------------
+
+
+def _expired_token(phi):
+    from tokens.macaroon import attenuate, mint
+    from tokens.scope import Scope
+
+    root = mint(ROOT_KEY, Scope.root_from_policy(phi))
+    return attenuate(root, Scope(expires_at=1000))  # epoch 1000: long gone
+
+
+def _call_with_now(server, token, now):
+    import json
+
+    request = {
+        "op": "call",
+        "tool_name": "pay_bill",
+        "args": {"t": "alice", "a": 1},
+        "token": token.to_obj(),
+        "now": now,
+    }
+    with _raw(server) as sock:
+        sock.sendall((json.dumps(request) + chr(10)).encode("ascii"))
+        return json.loads(sock.makefile("rb").readline())
+
+
+def test_a_lying_now_cannot_revive_an_expired_token(tmp_path, phi):
+    """The peer does not get to decide what time it is.
+
+    Scope.permits takes `now` as an argument because nothing in tokens/ reads
+    a clock, and SPEC.md section 11.2 puts `now` in the request object. But
+    SECURITY.md's adversary lies in every field it controls, and over this
+    transport that includes `now`: an agent holding a token that expired years
+    ago sends now=0 and the expiry check passes. That is not a weakened bound,
+    it is no bound at all. The server reads its own clock by default.
+    """
+    server = MonitorServer(_shim(tmp_path, phi), port=0)
+    _serve(server)
+    try:
+        reply = _call_with_now(server, _expired_token(phi), 0)
+        assert reply["ok"] is True, "the monitor was reached; this is a BLOCK"
+        assert reply["allowed"] is False
+        assert "expired" in reply["reason"]
+    finally:
+        server.stop()
+
+
+def test_an_unexpired_token_still_works_under_the_server_clock(tmp_path, phi):
+    """Ignoring the client's clock must not mean refusing everything: a token
+    that has not expired still passes the expiry check."""
+    from tokens.macaroon import attenuate, mint
+    from tokens.scope import Scope
+
+    token = attenuate(
+        mint(ROOT_KEY, Scope.root_from_policy(phi)),
+        Scope(expires_at=4_000_000_000),  # ~2096
+    )
+    server = MonitorServer(_shim(tmp_path, phi), port=0)
+    _serve(server)
+    try:
+        reply = _call_with_now(server, token, 0)
+        assert reply["allowed"] is True, reply["reason"]
+    finally:
+        server.stop()
+
+
+def test_clock_none_restores_the_literal_spec_behavior(tmp_path, phi):
+    """clock=None is the documented opt-out, for deterministic tests and for
+    a peer that is actually trusted. It must still be reachable, and it must
+    still be the unsafe one -- this test exists so the difference is visible
+    rather than implied."""
+    server = MonitorServer(_shim(tmp_path, phi), port=0, clock=None)
+    _serve(server)
+    try:
+        reply = _call_with_now(server, _expired_token(phi), 0)
+        assert reply["allowed"] is True, (
+            "clock=None believes the request, which is exactly why it is not "
+            "the default"
+        )
+    finally:
+        server.stop()
+
+
+def test_a_non_callable_clock_is_refused_at_construction(tmp_path, phi):
+    with pytest.raises(ServerError, match="clock must be callable"):
+        MonitorServer(_shim(tmp_path, phi), port=0, clock=12345)

@@ -104,6 +104,15 @@ gap rather than quietly assumed.
   They are defaults, not a claim: a peer that can open sockets in a loop can
   still make the monitor unavailable, and an unavailable monitor means no
   actions are authorized, not that actions proceed unchecked.
+- **Token expiry depends on who supplies the clock.** `Scope.expires_at` is
+  checked against a `now` passed into `Scope.permits`; nothing in `tokens/`
+  reads a clock, by design. `MonitorServer` therefore reads its OWN clock by
+  default and ignores the `now` field in the request. If you construct it
+  with `clock=None`, or build another transport that believes the peer's
+  `now`, then `expires_at` bounds nothing: an agent holding a token that
+  expired years ago sends `now: 0` and the check passes. In that
+  configuration `expires_at` is a convenience for cooperative callers, not a
+  control against the adversary described above.
 - **The transport does not authenticate its peer.** Any local process that
   can reach the loopback port can send requests. Holding a token is not
   authorization (SPEC.md §5.3) and both gates still run, so this does not
@@ -187,6 +196,9 @@ weaker system than this repository describes, silently.
       peer: any local process that can reach the loopback port can send
       requests. Both gates still run, so this widens nobody's authority — but
       restricting who can reach the port is your job, not the module's.
+- [ ] **Let the server keep time.** Leave `MonitorServer`'s `clock` at its
+      default. With `clock=None` the agent's own `now` decides expiry, and
+      `expires_at` stops being a bound.
 - [ ] **Leave `fsync=True`.** The order is decide, execute, log; without the
       sync a crash can lose the record of an action that already happened.
 - [ ] **Keep both keys off the agent's side of the boundary.** See above.

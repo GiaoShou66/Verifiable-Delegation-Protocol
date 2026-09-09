@@ -59,6 +59,27 @@ None of these can turn a BLOCK into an ALLOW; they only ever refuse earlier,
 and they refuse at the transport, before any token or monitor gate is
 consulted. That is the same shape as every other gate here (SPEC.md section
 5.4a), so section 3.4's correctness argument is untouched.
+
+--- Who decides what time it is ---
+
+`Scope.expires_at` (SPEC.md section 5.1) is checked against a `now` that
+`Scope.permits` takes as an argument, because nothing in `tokens/` reads a
+clock -- wall-clock time is kept out of the automaton deliberately. Over a
+transport that means SOMEBODY has to supply `now`, and SPEC.md section 11.2
+puts it in the request object.
+
+Taking it from the request is not safe here. SECURITY.md's adversary "may
+lie in every field it controls", and over this binding `now` is such a
+field: an agent holding a token that expired years ago sends `now: 0` and
+the expiry check passes. That is not a weakened bound, it is no bound --
+`expires_at` stops meaning anything the moment the peer picks the clock.
+
+So `MonitorServer` reads its OWN clock by default (`clock=time.time`) and
+ignores whatever the request said. The field is still accepted on the wire,
+for compatibility with section 11.2's request shape; it is simply not
+believed. Passing `clock=None` restores the literal section 11.2 behavior --
+useful for a deterministic test, and correct only when the peer is trusted,
+which by SPEC.md section 7 the agent never is.
 """
 
 from __future__ import annotations
@@ -66,7 +87,8 @@ from __future__ import annotations
 import json
 import socket
 import threading
-from typing import Mapping
+import time
+from typing import Callable, Mapping
 
 from runtime.shim import AgentShim
 from tokens.macaroon import Token, TokenError
@@ -149,6 +171,7 @@ class MonitorServer:
         "_max_line_bytes",
         "_idle_timeout",
         "_slots",
+        "_clock",
     )
 
     def __init__(
@@ -161,18 +184,28 @@ class MonitorServer:
         idle_timeout: float | None = DEFAULT_IDLE_TIMEOUT,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         backlog: int = 64,
+        clock: "Callable[[], float] | None" = time.time,
     ) -> None:
         """`max_line_bytes`, `idle_timeout`, and `max_connections` bound what
         a hostile peer can consume; see this module's docstring. Each may be
         tuned, and `idle_timeout=None` disables the timeout, but the byte and
         connection limits have no "unlimited" setting on purpose -- an
-        unbounded read on an agent-facing socket is the defect, not a mode."""
+        unbounded read on an agent-facing socket is the defect, not a mode.
+
+        `clock`: the source of `now` for token expiry (SPEC.md section 5.1).
+        Defaults to this server's own `time.time`, which is the only setting
+        under which `expires_at` bounds anything -- see the module docstring.
+        `clock=None` believes the client's `now` field instead, matching the
+        literal request shape in SPEC.md section 11.2; use it for
+        deterministic tests, not against an untrusted peer."""
         if not isinstance(shim, AgentShim):
             raise ServerError(f"expected an AgentShim, got {type(shim).__name__}")
         if not isinstance(max_line_bytes, int) or max_line_bytes < 1:
             raise ServerError("max_line_bytes must be a positive integer")
         if not isinstance(max_connections, int) or max_connections < 1:
             raise ServerError("max_connections must be a positive integer")
+        if clock is not None and not callable(clock):
+            raise ServerError("clock must be callable, or None")
         if idle_timeout is not None and (
             not isinstance(idle_timeout, (int, float)) or idle_timeout <= 0
         ):
@@ -181,6 +214,7 @@ class MonitorServer:
         self._max_line_bytes = max_line_bytes
         self._idle_timeout = None if idle_timeout is None else float(idle_timeout)
         self._slots = threading.BoundedSemaphore(max_connections)
+        self._clock = clock
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind((host, port))
@@ -309,7 +343,9 @@ class MonitorServer:
         tool_name = req.get("tool_name")
         args = req.get("args")
         token_obj = req.get("token")
-        now = req.get("now")
+        # The peer does not get to decide what time it is; see the module
+        # docstring. `clock=None` opts back into believing the request.
+        now = req.get("now") if self._clock is None else int(self._clock())
 
         token: object = None
         if token_obj is not None:
