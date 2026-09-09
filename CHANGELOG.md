@@ -8,6 +8,76 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 Spec revisions are `vdp-spec-MAJOR.MINOR`; this project is pre-1.0, so any
 minor revision may include breaking changes to the grammar or wire formats.
 
+## [Unreleased]
+
+One NORMATIVE change to SPEC.md, plus reference-implementation hardening
+that does not alter any wire format. No policy, token, or audit record
+written under `vdp-spec-0.3` changes shape, so this is not a revision bump —
+but the transport rule below is a MUST NOT that a conforming implementation
+has to satisfy, and it is recorded here rather than folded silently into
+0.3.
+
+- **`now` MUST NOT come from an untrusted peer** (SPEC.md §11.2, new
+  paragraph). `Scope.expires_at` (§5.1) is checked against a `now` that
+  `Scope.permits` receives as an argument, because nothing in the token layer
+  reads a clock. §11.2's request shape carries a `now` field, and the
+  reference `MonitorServer` read it straight from the request — so an agent
+  holding a token that expired years ago sent `now: 0` and the expiry check
+  passed. §7 already says the agent may lie in every field it controls; this
+  was such a field, which made `expires_at` bound nothing at all against the
+  adversary it is specified for. Demonstrated end to end before fixing.
+  `MonitorServer` now reads its own clock by default and ignores the
+  request's `now`; the field stays on the wire for compatibility but is not
+  believed. `clock=None` restores the old behavior for deterministic tests
+  and genuinely trusted peers. A conforming implementation SHOULD read its
+  own clock, and one that does not MUST NOT describe `expires_at` as a bound
+  against §7's adversary.
+- **Plain-language rendering no longer understates a per-target cap**
+  (`policy.render.render_english`). It described a per-target counter as "at
+  most $100.00 to any one target" and stopped; with three whitelisted
+  recipients the policy permits $300.00. `worst_case()` already reported both
+  figures as §4 requires, but the rendering is a separate surface that
+  `confirm.gate_text` can be asked to show without the preview
+  (`require_preview=False`), and it is the one a human actually reads. It now
+  states the aggregate too. Global caps are unchanged: their bound already is
+  the total.
+- **Transport resource bounds** (SPEC.md §11 behavior, no wire change).
+  `MonitorServer` gains `max_line_bytes`, `idle_timeout`, and
+  `max_connections`. A request line was read with no limit, an accepted
+  connection had no timeout, and connection threads were uncapped — none of
+  which could let a bad prefix through, but all of which let a hostile local
+  peer deny service to the monitor. They refuse earlier and never later, so
+  §3.4 is untouched.
+- **Audit records are `fsync`ed before `append()` returns**
+  (`AuditLog(fsync=True)`, the default). The order is decide, execute, log
+  (DESIGN.md §3.3), so a crash in that window previously lost the record of
+  an action that had already happened. `AuditLog.verify()` also now reports
+  an unparsable line as a finding rather than raising, matching the reasoning
+  already documented for the 64-hex digest check.
+- **Conformance vectors are executed** (`tests/test_conformance.py`).
+  §10 names `spec/conformance/*.vectors.json` as the conformance criterion,
+  but nothing read them: the reference implementation could drift from its
+  own published fixtures with a green suite. The shipped JSON Schemas in
+  `spec/schema/` are now also validated against what `Policy`, `Token`, and
+  `Record` actually emit, rather than only checked for being well-formed.
+- **The §3.4 independent checker now covers every counter mode.**
+  `tests/strategies.py` built `CounterDecl` without `counting` or
+  `per_target`, so `policies()` only ever generated vdp-spec-0.2 policies and
+  three of the four combinations were never reached by any property test —
+  including per-target, the mode that widens `Q` by a factor of `|T|`.
+  §3.4's obligation was being met for 0.2 policies only. Both the generator
+  and the reference checker now handle all four; the implementation and the
+  checker agree across them.
+- **Packaging and CI.** `pyproject.toml` (zero runtime dependencies, the
+  standard-library-only claim expressed in metadata), `py.typed` markers, and
+  a workflow running the suite on 3.11–3.13 across Linux and Windows, plus a
+  check that the enforcement path imports nothing third-party even when
+  `cryptography` is installed.
+- **Key management and a deployment checklist** (SECURITY.md). There was no
+  guidance for the two keys the token and log guarantees rest on. The
+  checklist states plainly that every hardening option is off by default and
+  that those defaults are chosen for backward compatibility, not safety.
+
 ## [vdp-spec-0.3] — counters, artifact binding, transport, attestation, revocation
 
 Seven additions. All backward compatible at the policy-language and
