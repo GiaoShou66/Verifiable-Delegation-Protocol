@@ -197,3 +197,65 @@ def test_artifact_version_one_is_refused() -> None:
                 ],
             }
         )
+
+
+# --------------------------------------------------------------------------
+# The shipped JSON Schemas vs what the code actually emits
+# --------------------------------------------------------------------------
+
+SCHEMA_DIR = Path(__file__).resolve().parent.parent / "spec" / "schema"
+
+
+def _schema(name: str) -> dict:
+    return json.loads((SCHEMA_DIR / name).read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def jsonschema_module():
+    """`jsonschema` is a test-only convenience, not a dependency of anything
+    on the enforcement path. Skip rather than fail when it is absent."""
+    return pytest.importorskip("jsonschema")
+
+
+def test_policy_artifact_matches_its_schema(jsonschema_module):
+    """SPEC.md section 10 ships these schemas so OTHER implementations can
+    code against them. A schema that has drifted from what this code emits
+    misleads every one of them, silently, and the CI check that the schema
+    merely parses would not notice."""
+    phi = _policy_from_obj(CASES[0][2])
+    jsonschema_module.validate(phi.to_canonical_obj(), _schema("policy-artifact.schema.json"))
+
+
+def test_token_wire_format_matches_its_schema(jsonschema_module):
+    from tokens.macaroon import attenuate, mint
+    from tokens.scope import Scope
+
+    phi = _policy_from_obj(CASES[0][2])
+    token = mint(b"k" * 32, Scope.root_from_policy(phi), policy_hash=phi.digest())
+    jsonschema_module.validate(token.to_obj(), _schema("token.schema.json"))
+
+    # An attenuated token carries caveats; the schema must cover that shape
+    # too, not just the freshly minted one.
+    narrowed = attenuate(token, Scope(verbs=frozenset({"pay"})))
+    jsonschema_module.validate(narrowed.to_obj(), _schema("token.schema.json"))
+
+
+def test_audit_record_matches_its_schema(tmp_path, jsonschema_module):
+    from monitor.mediate import Monitor
+    from runtime.auditlog import AuditLog
+
+    phi = _policy_from_obj(CASES[0][2])
+    log = AuditLog(tmp_path / "audit.jsonl", phi.digest(), b"l" * 32, fsync=False)
+    symbol = Monitor(phi).automaton.alpha(
+        ConcreteAction(verb="pay", target="alice", amount=1)
+    )
+    record = log.append(
+        action=None,
+        symbol=symbol,
+        pre_state=(0,),
+        post_state=(1,),
+        decision="ALLOW",
+        reason="conformance",
+        token_id="<no-token>",
+    )
+    jsonschema_module.validate(record.to_obj(), _schema("audit-record.schema.json"))

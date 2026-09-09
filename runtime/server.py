@@ -213,9 +213,19 @@ class MonitorServer:
                 # 11.2), which is exactly true, and costs no thread.
                 self._refuse(conn, "monitor is at its connection limit")
                 continue
-            threading.Thread(
-                target=self._run_connection, args=(conn,), daemon=True
-            ).start()
+            try:
+                threading.Thread(
+                    target=self._run_connection, args=(conn,), daemon=True
+                ).start()
+            except RuntimeError:
+                # The interpreter refused a new thread -- which is exactly the
+                # exhaustion `max_connections` exists to survive, so it must
+                # not be the thing that kills the accept loop. Release the slot
+                # we took, refuse this connection, keep serving. Without this,
+                # the slot leaks AND the exception escapes serve_forever,
+                # leaving a monitor that accepts nothing ever again.
+                self._slots.release()
+                self._refuse(conn, "monitor could not start a handler thread")
 
     def _refuse(self, conn: socket.socket, reason: str) -> None:
         """Send one protocol-level refusal and close. Best effort: a peer that

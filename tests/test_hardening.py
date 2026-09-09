@@ -200,6 +200,56 @@ def test_connection_slot_is_released_on_close(tmp_path, phi):
         server.stop()
 
 
+def test_a_failed_handler_thread_does_not_kill_the_server(tmp_path, phi, monkeypatch):
+    """Thread exhaustion is the condition `max_connections` exists to survive,
+    so it must not be what kills the accept loop.
+
+    If `Thread.start()` raises, the slot taken for that connection has to come
+    back and `serve_forever` has to keep accepting. Otherwise the failure mode
+    is the worst one available: a monitor that is up, holding its port, and
+    accepting nothing ever again.
+    """
+    server = MonitorServer(_shim(tmp_path, phi), port=0, max_connections=2)
+
+    real_start = threading.Thread.start
+    failures = {"left": 1}
+
+    def flaky_start(self):
+        if failures["left"] and getattr(self, "_target", None) == server._run_connection:
+            failures["left"] -= 1
+            raise RuntimeError("can't start new thread")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", flaky_start)
+    _serve(server)
+    try:
+        with _raw(server) as sock:
+            reply = sock.makefile("rb").readline()
+        assert b'"ok":false' in _compact(reply)
+        assert b"handler thread" in reply
+
+        # The loop survived, and the slot came back: a normal request still
+        # works afterwards.
+        deadline = time.monotonic() + 5.0
+        while True:
+            reply = b""
+            try:
+                with _raw(server) as sock:
+                    sock.sendall(REMAINING_REQUEST)
+                    reply = sock.makefile("rb").readline()
+            except OSError:
+                pass
+            if b'"ok":true' in _compact(reply):
+                break
+            assert time.monotonic() < deadline, (
+                f"server never recovered from a failed thread start "
+                f"(last reply: {reply!r})"
+            )
+            time.sleep(0.02)
+    finally:
+        server.stop()
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

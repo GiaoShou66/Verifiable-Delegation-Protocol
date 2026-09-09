@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools>=68"]
+# >=77 is required, not merely preferred: `license` as an SPDX string
+# and `license-files` are PEP 639, which setuptools added in 77.0.0.
+# An older resolver would fail to build this project, not warn.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -31,8 +34,11 @@ dependencies = []
 # reaches outside the standard library. It is imported lazily and is never on
 # a decision path.
 attest = ["cryptography>=42"]
-test = ["pytest>=8", "hypothesis>=6.100"]
-dev = ["pytest>=8", "hypothesis>=6.100", "ruff>=0.6", "mypy>=1.11"]
+# jsonschema is here so tests/test_conformance.py can check the schemas in
+# spec/schema/ against what the code actually emits. Nothing on the
+# enforcement path imports it, and the tests skip if it is absent.
+test = ["pytest>=8", "hypothesis>=6.100", "jsonschema>=4.20"]
+dev = ["pytest>=8", "hypothesis>=6.100", "jsonschema>=4.20", "ruff>=0.6", "mypy>=1.11"]
 
 [tool.setuptools]
 # Flat layout, listed explicitly rather than auto-discovered: `demo` ships
