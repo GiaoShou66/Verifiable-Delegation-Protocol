@@ -56,6 +56,11 @@ def demo_policy() -> Policy:
 # --------------------------------------------------------------------------
 
 
+#: The single dimension a GLOBAL counter keeps, standing in for section 3.2's
+#: `slot(i, target) = *`. Not a string, so it cannot collide with any target.
+_GLOBAL = object()
+
+
 def reference_violates(policy: Policy, actions) -> bool:
     """Does this trace violate phi? Evaluated directly from DESIGN.md 2.1.
 
@@ -64,8 +69,18 @@ def reference_violates(policy: Policy, actions) -> bool:
     afterwards, and re-derives the well-formedness conditions of section 1.2
     inline. It imports nothing from `monitor`. If this and the automaton ever
     disagree, one of them is wrong and the property test says so.
+
+    Covers both counter modes from spec revision 0.3 (sections 2.1a
+    call-counting, 2.1b per-target). It previously modelled only the
+    amount-summing global case -- which was invisible because `policies()`
+    never generated the other three combinations either, so SPEC.md section
+    3.4's independent-checker obligation was being met for vdp-spec-0.2
+    policies only.
     """
-    totals = {decl.name: 0 for decl in policy.counters}
+    # {counter name: {target or _GLOBAL: running total}}. A global counter
+    # keeps exactly one entry; a per-target counter keeps one per target it
+    # has actually seen, which is bounded because T is finite (section 1.2).
+    totals: dict[str, dict] = {decl.name: {} for decl in policy.counters}
 
     for action in actions:
         # Section 1.2 -- the conditions under which alpha yields a sink symbol.
@@ -89,12 +104,26 @@ def reference_violates(policy: Policy, actions) -> bool:
             ):
                 return True
 
-        # Section 2.1 -- monotone cumulative counters.
+        # Section 2.1 -- monotone cumulative counters, in all four
+        # combinations of the two independent flags (sections 2.1a, 2.1b):
+        #
+        #   counting=False  contributes `amount`  |  counting=True   contributes 1
+        #   per_target=False one running total    |  per_target=True one per target
+        #
+        # Written from the spec text, not from `Automaton.delta`: a per-target
+        # counter is modelled here as a dict keyed by target, where the
+        # automaton allocates a flat state slot per (counter, target). If the
+        # two ever disagree, the property test says so -- which is the whole
+        # point of keeping this checker shaped differently.
         for decl in policy.counters:
             if action.verb in decl.verbs:
-                totals[decl.name] += action.amount
+                key = action.target if decl.per_target else _GLOBAL
+                step = 1 if decl.counting else action.amount
+                totals[decl.name][key] = totals[decl.name].get(key, 0) + step
         for clause in policy.clauses:
-            if isinstance(clause, Cap) and totals[clause.counter] > clause.bound:
+            if isinstance(clause, Cap) and any(
+                total > clause.bound for total in totals[clause.counter].values()
+            ):
                 return True
 
     return False

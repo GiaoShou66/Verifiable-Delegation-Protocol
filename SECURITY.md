@@ -118,6 +118,79 @@ gap rather than quietly assumed.
 None of these are silent — each is asserted explicitly in the relevant
 module's docstring and in [DESIGN.md §6–7](DESIGN.md).
 
+## Key management
+
+VDP has two symmetric keys, and the guarantees that depend on them are
+different. Neither is generated, stored, or rotated for you — this section
+says what you must do, because nothing in the code will do it or warn you.
+
+| Key | Guards | If it leaks |
+|---|---|---|
+| Root key `k` | Token unforgeability (§5.3). Only `mint()` needs it. | An attacker mints root tokens with any scope. The monitor gate still holds — φ is never exceeded — but the token gate is gone. |
+| Log key `k_log` | The audit log's `sig` field (§6.1). | An attacker can forge `sig` on records they write. The hash chain still links, so a verifier holding an external anchor still detects tampering; one without it does not. |
+
+**Generation.** Both MUST be at least 32 bytes
+(`tokens.macaroon.MIN_KEY_BYTES`; `mint()` and `AuditLog()` refuse shorter
+ones). Use a CSPRNG — `secrets.token_bytes(32)`. Do not derive either from a
+password, a hostname, a policy hash, or anything else guessable.
+
+**Separation.** Use two independent keys. Reusing one value for both puts the
+log's integrity and the tokens' unforgeability behind a single secret, for no
+benefit — the domain-separation prefixes (§5.3) stop cross-protocol
+reinterpretation, not a shared-key compromise.
+
+**Storage.** `k` MUST NOT be reachable by any agent (§5.3), which in practice
+means it never lives in the agent's process, its environment, or any file it
+can read. This is the same boundary DESIGN.md §7.5 draws for the monitor
+itself, and `runtime.server` is how you enforce it rather than merely assert
+it.
+
+**Rotation: there is no mechanism, and that is a real limitation.** No
+re-keying path exists. Changing `k` invalidates every outstanding token at
+once, including ones already delegated to sub-agents, because verification
+recomputes the whole chain from the root. Changing `k_log` makes every
+existing `sig` fail to verify; the hash chain still checks, so the log is
+readable but its signatures are not. Plan rotation as a policy boundary: new
+key, new policy artifact, new log — which the code already pushes you toward,
+since `AuditLog` refuses to append to a log written under a different
+`policy_hash`.
+
+**Compromise.** If `k` leaks: revoke outstanding `token_id`s you know of
+(§5.4a), rotate `k`, and re-mint. Note that revocation does not reach
+descendants — an attenuated child has a different `token_id` (§5.4a), so a
+subtree you did not enumerate stays live until `expires_at`. If `k_log`
+leaks, the log's `sig` values are worthless from that point on; the hash
+chain and any external anchor you published are what remain.
+
+## Deployment checklist
+
+Every item here is OFF by default, and the defaults are chosen for backward
+compatibility, not for safety. A deployment that skips these is running a
+weaker system than this repository describes, silently.
+
+- [ ] **Bind the root token to the policy artifact.** `mint(k, scope)`
+      defaults to `policy_hash=""` — unbound. Pass `policy.digest()`, and
+      have the verifier require it. Unbound tokens verify interchangeably
+      between two policies that produce the same root scope (§5.1a).
+- [ ] **Assert the tool mapping table.** Pass `expected_artifact_hash=` to
+      `AgentShim`. `policy_hash` alone does not cover the table that decides
+      what an `amount` argument MEANS — swapping `cents` for `dollars`
+      authorizes 100× the confirmed loss without changing `policy_hash`
+      (§1.1).
+- [ ] **Wire an external anchor.** Pass `on_append=` to `AuditLog` and
+      publish each `head` somewhere the agent cannot write. Without it, tail
+      truncation is undetectable, and `verify()` will keep telling you so.
+- [ ] **Run the monitor out of process.** Use `runtime.server.MonitorServer`
+      / `runtime.client.MonitorClient`. In-process is an architectural
+      separation, not an enforced one (DESIGN.md §7.5).
+- [ ] **Isolate the monitor's port.** The transport does not authenticate its
+      peer: any local process that can reach the loopback port can send
+      requests. Both gates still run, so this widens nobody's authority — but
+      restricting who can reach the port is your job, not the module's.
+- [ ] **Leave `fsync=True`.** The order is decide, execute, log; without the
+      sync a crash can lose the record of an action that already happened.
+- [ ] **Keep both keys off the agent's side of the boundary.** See above.
+
 ## Reporting a vulnerability
 
 If you find a way to violate the "never out of bounds" guarantee — an

@@ -224,11 +224,15 @@ def mint(key: bytes, root: Scope, policy_hash: str = "") -> Token:
 
     Called by the issuer after the human confirmation gate, never by an agent.
 
-    `policy_hash`: optional. "" (default) mints an unbound token, exactly as
-    before this parameter existed. Passing `policy.digest()` binds this root
-    token's tag to that specific policy artifact (Token.policy_hash), closing
-    the gap where two structurally-identical root scopes minted under
-    different policies would otherwise verify interchangeably.
+    `policy_hash`: optional, and the default is the WEAKER of the two paths.
+    "" (default) mints an unbound token, exactly as before this parameter
+    existed -- the default is backward compatibility, not a recommendation.
+    Passing `policy.digest()` binds this root token's tag to that specific
+    policy artifact (Token.policy_hash), closing the gap where two
+    structurally-identical root scopes minted under different policies verify
+    interchangeably (SPEC.md section 5.1a). A deployment should pass it and
+    have the verifier require it; SECURITY.md's deployment checklist lists
+    this first for that reason.
     """
     key_bytes = _check_key(key)
     if not isinstance(root, Scope):

@@ -58,7 +58,19 @@ def policies(draw) -> Policy:
                 st.sampled_from(verbs), min_size=1, max_size=len(verbs), unique=True
             )
         )
-        counters.append(CounterDecl(name=name, verbs=frozenset(members)))
+        # Both counter modes from spec revision 0.3 are drawn, not defaulted.
+        # Leaving them at False meant `policies()` only ever produced
+        # vdp-spec-0.2 policies, so the newest and least-exercised part of the
+        # automaton -- the part that widens Q by |T| -- was never reached by
+        # any property test (SPEC.md sections 2.1a and 2.1b).
+        counters.append(
+            CounterDecl(
+                name=name,
+                verbs=frozenset(members),
+                counting=draw(st.booleans()),
+                per_target=draw(st.booleans()),
+            )
+        )
         clauses.append(
             Cap(
                 counter=name,

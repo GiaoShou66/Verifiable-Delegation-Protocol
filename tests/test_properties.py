@@ -59,10 +59,11 @@ def build(policy, tmp_path, name: str, token: Token | None = None):
     log = AuditLog(
         tmp_path / f"{name}-{next(_LOG_SEQ)}.jsonl", policy.digest(), LOG_KEY
     )
-    shim = AgentShim(Monitor(policy), tools_for(policy), log, ROOT_KEY)
+    monitor = Monitor(policy)
+    shim = AgentShim(monitor, tools_for(policy), log, ROOT_KEY)
     if token is None:
         token = mint(ROOT_KEY, Scope.root_from_policy(policy))
-    return shim, log, token
+    return shim, log, token, monitor
 
 
 def call_action(shim, token, action: ConcreteAction):
@@ -87,7 +88,7 @@ def test_nothing_the_shim_executes_violates_phi(tmp_path, data):
     """Invariant (a) through the full stack, against an independent checker."""
     phi = data.draw(policies())
     actions = data.draw(st.lists(hostile_actions(phi), max_size=10))
-    shim, log, token = build(phi, tmp_path, "a")
+    shim, log, token, _m = build(phi, tmp_path, "a")
 
     executed: list[ConcreteAction] = []
     for action in actions:
@@ -111,7 +112,7 @@ def test_a_refused_call_changes_nothing_an_agent_can_observe(tmp_path, data):
     """
     phi = data.draw(policies())
     actions = data.draw(st.lists(hostile_actions(phi), max_size=10))
-    shim, _log, token = build(phi, tmp_path, "b")
+    shim, _log, token, _m = build(phi, tmp_path, "b")
 
     for action in actions:
         before = (shim.remaining(), shim.spent_under(token))
@@ -130,7 +131,7 @@ def test_the_worst_case_shown_to_the_human_bounds_every_executed_trace(tmp_path,
     actions = data.draw(st.lists(hostile_actions(phi), max_size=12))
     preview = {c.counter: c.l_max for c in worst_case(phi).counters}
 
-    shim, _log, token = build(phi, tmp_path, "c")
+    shim, _log, token, _m = build(phi, tmp_path, "c")
     for action in actions:
         call_action(shim, token, action)
 
@@ -163,8 +164,8 @@ def test_a_child_token_can_never_do_what_its_parent_could_not(tmp_path, data):
         child = attenuate(child, caveat)
     assert child.scope.is_subset_of(parent.scope)
 
-    parent_shim, _p, _pt = build(phi, tmp_path, "parent", parent)
-    child_shim, _c, _ct = build(phi, tmp_path, "child", child)
+    parent_shim, _p, _pt, _pm = build(phi, tmp_path, "parent", parent)
+    child_shim, _c, _ct, _cm = build(phi, tmp_path, "child", child)
 
     for action in actions:
         child_outcome = call_action(child_shim, child, action)
@@ -186,7 +187,7 @@ def test_delegation_depth_never_widens_anything(tmp_path, data):
     for caveat in [None, *caveats]:
         if caveat is not None:
             token = attenuate(token, caveat)
-        shim, _log, _t = build(phi, tmp_path, f"d{token.depth}", token)
+        shim, _log, _t, _m = build(phi, tmp_path, f"d{token.depth}", token)
         allowed_at_depth.append(call_action(shim, token, action).allowed)
 
     # Once a depth refuses the action, no deeper token may accept it.
@@ -204,7 +205,7 @@ def test_delegation_depth_never_widens_anything(tmp_path, data):
 def test_the_log_replays_to_the_same_decisions_for_any_hostile_trace(tmp_path, data):
     phi = data.draw(policies())
     actions = data.draw(st.lists(hostile_actions(phi), max_size=10))
-    shim, log, token = build(phi, tmp_path, "log")
+    shim, log, token, monitor = build(phi, tmp_path, "log")
 
     for action in actions:
         call_action(shim, token, action)
@@ -221,5 +222,12 @@ def test_the_log_replays_to_the_same_decisions_for_any_hostile_trace(tmp_path, d
             assert list(replayed) == list(record.pre_state)
             replayed = tuple(record.post_state)
 
-    names = [decl.name for decl in phi.counters]
-    assert dict(zip(names, replayed, strict=True)) == counters_of(shim, phi)
+    # Replaying the log must land on exactly the state the live monitor is in.
+    #
+    # This used to zip counter NAMES against the state tuple, which holds only
+    # when every counter contributes one slot. A per-target counter contributes
+    # |T| of them (SPEC.md section 2.1b), so the lists differ in length and the
+    # zip silently compared a prefix -- invisible until `policies()` started
+    # generating per-target counters. Comparing the tuples says more, and says
+    # it for every counter mode.
+    assert tuple(replayed) == tuple(monitor.state)

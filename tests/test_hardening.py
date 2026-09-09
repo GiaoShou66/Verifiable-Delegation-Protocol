@@ -81,11 +81,15 @@ REMAINING_REQUEST = b'{"op":"remaining"}\n'
 def test_over_length_line_is_refused_not_buffered(tmp_path, phi):
     """A peer streaming a newline-free line gets one refusal and a closed
     socket, instead of growing the server's read buffer without bound."""
-    server = MonitorServer(_shim(tmp_path, phi), port=0, max_line_bytes=4096)
+    # A small limit and a payload that still fits the local send buffer: the
+    # point is to exceed the LIMIT, not to race the server's close. Sending
+    # megabytes here means sendall is still writing when the server refuses
+    # and closes, and the peer sees a reset instead of the refusal it earned.
+    server = MonitorServer(_shim(tmp_path, phi), port=0, max_line_bytes=256)
     _serve(server)
     try:
         with _raw(server) as sock:
-            sock.sendall(b"x" * 65536)  # sixteen times the limit, no newline
+            sock.sendall(b"x" * 4096)  # sixteen times the limit, no newline
             reply = sock.makefile("rb").readline()
         assert b'"ok":false' in _compact(reply)
         assert b"exceeds" in reply
