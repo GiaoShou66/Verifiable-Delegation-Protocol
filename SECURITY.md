@@ -92,6 +92,29 @@ gap rather than quietly assumed.
   checkpoints. `NullAttestor` remains the default; nothing is attested
   unless you explicitly instantiate `Ed25519Attestor` and wire it in.
 
+- **Availability is not part of the guarantee.** The "no bad prefix"
+  property (SPEC.md §3.4) says nothing about the monitor still being
+  reachable. `runtime.server.MonitorServer` bounds what a hostile local peer
+  can consume — `max_line_bytes` (a request line is read with a limit, so a
+  peer streaming newline-free bytes cannot grow the read buffer without
+  bound), `idle_timeout` (a stalled connection is closed rather than pinning
+  a thread), and `max_connections` (concurrent connection threads are
+  capped, and connections past the cap are refused with `ok: false`). These
+  refuse EARLIER, never later, so they cannot turn a BLOCK into an ALLOW.
+  They are defaults, not a claim: a peer that can open sockets in a loop can
+  still make the monitor unavailable, and an unavailable monitor means no
+  actions are authorized, not that actions proceed unchecked.
+- **The transport does not authenticate its peer.** Any local process that
+  can reach the loopback port can send requests. Holding a token is not
+  authorization (SPEC.md §5.3) and both gates still run, so this does not
+  widen anyone's authority — but it does mean process-level isolation of the
+  monitor's port is the deployer's job, not this module's.
+- **A record reaches disk before `append()` returns** (`fsync=True`, the
+  default). Without it, the decide → execute → log order (DESIGN.md §3.3)
+  means a crash could leave an action that HAPPENED with no record that it
+  did. `fsync=False` opts out; anything relying on the log as evidence
+  should not.
+
 None of these are silent — each is asserted explicitly in the relevant
 module's docstring and in [DESIGN.md §6–7](DESIGN.md).
 

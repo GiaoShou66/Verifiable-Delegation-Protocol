@@ -16,10 +16,22 @@ by. Against an attacker with filesystem write access, tampering is DETECTABLE,
 NOT PREVENTABLE, and detectable only by a verifier who knows the latest `hash_n`
 from outside the file.
 
-TRUNCATION OF THE TAIL IS UNDETECTABLE without such an external anchor, and VDP
-v0.1 does not anchor externally. `verify()` says so in its own result rather
-than quietly reporting success: a truncated log is a VALID CHAIN over fewer
-records, and no amount of hashing inside the file can change that.
+TRUNCATION OF THE TAIL IS UNDETECTABLE without such an external anchor, and
+this log has no network access with which to publish one itself. `verify()`
+says so in its own result rather than quietly reporting success: a truncated
+log is a VALID CHAIN over fewer records, and no amount of hashing inside the
+file can change that. `AuditLog(..., on_append=...)` is the wiring point --
+publish each `head` somewhere the agent cannot write and the gap closes; leave
+it unwired and it stays open, which is why `verify()` keeps saying so.
+
+--- What durability is worth ---
+
+A record is written and flushed to disk with `fsync` before `append()`
+returns (`fsync=False` opts out, for tests and throughput). DESIGN.md section
+3.3 fixes the order as decide, execute, log -- so a crash between an action
+executing and a buffered write reaching disk would leave an action that
+HAPPENED with no evidence that it did. Of the two directions this can fail
+in, that is the one that must not happen.
 
 --- What `sig` is worth ---
 
@@ -36,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +61,25 @@ __all__ = ["AuditLog", "AuditLogError", "Record", "VerificationResult", "genesis
 
 class AuditLogError(ValueError):
     """A malformed record or an unusable log file."""
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Sync a directory entry, where the platform has such a thing.
+
+    POSIX needs this for a newly created file to be findable after a crash.
+    Windows has no directory file descriptor to open, so `os.open` on one
+    fails -- that is expected, not an error to propagate out of `append()`.
+    """
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 _GENESIS_DOMAIN = b"vdp/v1/genesis\x00"
@@ -218,9 +250,10 @@ class VerificationResult:
     ok: bool
     checked: int
     problems: tuple[str, ...] = ()
-    #: Always True in v0.1. A verifier who does not hold `hash_n` from outside
-    #: the file cannot tell a complete log from a truncated one. This field
-    #: exists so nobody reads `ok is True` as "nothing was removed."
+    #: Always True from inside the file. A verifier who does not hold `hash_n`
+    #: from outside it cannot tell a complete log from a truncated one, no
+    #: matter what the chain says. This field exists so nobody reads
+    #: `ok is True` as "nothing was removed."
     tail_truncation_undetectable: bool = True
 
     def summary(self) -> str:
@@ -228,8 +261,9 @@ class VerificationResult:
         lines.extend(f"  - {problem}" for problem in self.problems)
         if self.ok:
             lines.append(
-                "  note: tail truncation cannot be detected without an external "
-                "anchor for the final hash; v0.1 does not anchor externally"
+                "  note: tail truncation cannot be detected from inside the file; "
+                "compare the final hash against an external anchor "
+                "(AuditLog(on_append=...)) to close that gap"
             )
         return "\n".join(lines)
 
@@ -242,7 +276,15 @@ class AuditLog:
     through `runtime.shim`, which exposes `call()` and nothing else.
     """
 
-    __slots__ = ("_path", "_policy_hash", "_log_key", "_last_hash", "_seq", "_on_append")
+    __slots__ = (
+        "_path",
+        "_policy_hash",
+        "_log_key",
+        "_last_hash",
+        "_seq",
+        "_on_append",
+        "_fsync",
+    )
 
     def __init__(
         self,
@@ -251,8 +293,18 @@ class AuditLog:
         log_key: bytes,
         *,
         on_append: "Callable[[str], None] | None" = None,
+        fsync: bool = True,
     ) -> None:
         """
+        `fsync`: default True. Each `append()` flushes the record and calls
+        `os.fsync` before returning, so a record exists on disk before the
+        caller proceeds. The decision order is decide, execute, log
+        (DESIGN.md section 3.3); with buffered writes alone, a crash in that
+        window loses the evidence for an action that already happened, which
+        is the one failure direction an audit log cannot have. Set it False
+        only where losing the tail on a crash is acceptable -- tests, or a
+        throughput measurement that says so.
+
         `on_append`: optional. If given, called with the new `head` hash
         (hex string) after every successful `append()` -- including for a
         BLOCK, since a blocked attempt still advances the chain (section
@@ -278,6 +330,7 @@ class AuditLog:
         self._last_hash = genesis_hash(policy_hash)
         self._seq = 0
         self._on_append = on_append
+        self._fsync = bool(fsync)
 
         # Resume an existing log rather than overwriting it: opening for write
         # would be a delete in disguise.
@@ -355,8 +408,18 @@ class AuditLog:
         ).hexdigest()
         record = Record(**body, hash=digest, sig=self._sign(digest))
 
+        is_new = not self._path.exists()
         with self._path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(_canonical(record.to_obj()).decode("utf-8") + "\n")
+            if self._fsync:
+                handle.flush()
+                os.fsync(handle.fileno())
+        if self._fsync and is_new:
+            # A newly created file's DIRECTORY entry needs its own sync on
+            # POSIX, or the first record can survive as a file nobody can
+            # find. Best effort: Windows has no directory file descriptor to
+            # sync, and raises here rather than silently doing nothing.
+            _fsync_dir(self._path.parent)
 
         self._last_hash = digest
         self._seq += 1
@@ -392,7 +455,17 @@ class AuditLog:
         """
         problems: list[str] = []
         prev = genesis_hash(self._policy_hash)
-        records = self.records()
+        try:
+            records = self.records()
+        except AuditLogError as exc:
+            # An unreadable line is a FINDING about the log, not a crash in
+            # the verifier. Same reasoning as `Record.from_obj`'s hex check
+            # (see above): a tampered or half-written file must produce a
+            # verdict, because a verifier that raises tells an operator far
+            # less than one that says "record 7 is unparsable".
+            return VerificationResult(
+                ok=False, checked=0, problems=(f"log is unreadable: {exc}",)
+            )
 
         for index, record in enumerate(records):
             where = f"record {index} (seq {record.seq})"

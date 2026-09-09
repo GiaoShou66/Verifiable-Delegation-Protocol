@@ -33,6 +33,32 @@ log key, the `AuditLog` or `Monitor` objects themselves, or any full audit
 `MonitorServer` binds `127.0.0.1` unless told otherwise. Listening on every
 interface by default would make "reachable only over a narrow interface" a
 lie the moment this module was imported into a networked deployment.
+
+--- Resource bounds, because the peer is hostile ---
+
+SPEC.md section 7 puts the AGENT outside the TCB, and this module is the
+agent's only door into the monitor. A peer that exhausts the monitor's
+memory, threads, or file descriptors has denied service to the one component
+the whole guarantee is stated against -- so every unbounded resource on this
+path is bounded here, explicitly:
+
+- `max_line_bytes` -- a request line is read with a limit. A peer that opens
+  a connection and streams bytes containing no newline would otherwise grow
+  the read buffer without bound (`readline()` on a socket file object has no
+  limit of its own). Over-length gets one `ok: false` response and the
+  connection is dropped: a stream whose framing has already been violated
+  cannot be resynchronized, only abandoned.
+- `idle_timeout` -- an accepted connection that never sends anything, or
+  stalls mid-request, is closed rather than holding its thread forever.
+- `max_connections` -- concurrent connection threads are capped. Past the
+  cap a new connection is refused with `ok: false` and closed immediately,
+  which is honest (`ok: false` means the monitor was never consulted, SPEC.md
+  section 11.2) and costs one short-lived socket rather than a thread.
+
+None of these can turn a BLOCK into an ALLOW; they only ever refuse earlier,
+and they refuse at the transport, before any token or monitor gate is
+consulted. That is the same shape as every other gate here (SPEC.md section
+5.4a), so section 3.4's correctness argument is untouched.
 """
 
 from __future__ import annotations
@@ -45,7 +71,31 @@ from typing import Mapping
 from runtime.shim import AgentShim
 from tokens.macaroon import Token, TokenError
 
-__all__ = ["MonitorServer", "ServerError"]
+__all__ = [
+    "DEFAULT_IDLE_TIMEOUT",
+    "DEFAULT_MAX_CONNECTIONS",
+    "DEFAULT_MAX_LINE_BYTES",
+    "MonitorServer",
+    "ServerError",
+]
+
+#: Largest request line accepted, in bytes. A `call` request carries a tool
+#: name, an args object, and a token whose caveat chain is bounded only by how
+#: many times a holder chose to attenuate -- so this is generous. It exists to
+#: be finite, not to be tight.
+DEFAULT_MAX_LINE_BYTES = 1 << 20  # 1 MiB
+
+#: Seconds an accepted connection may sit without completing a request line
+#: before it is closed. Blocking, synchronous clients (`runtime.client`) send
+#: a request immediately and wait, so this only ever fires on a stalled or
+#: abandoned peer.
+DEFAULT_IDLE_TIMEOUT = 30.0
+
+#: Concurrent connection threads. One per agent process is the expected shape
+#: (this module's class docstring); the cap is what stops a peer that opens
+#: sockets in a loop from turning connection accounting into thread
+#: exhaustion.
+DEFAULT_MAX_CONNECTIONS = 64
 
 
 class ServerError(ValueError):
@@ -91,18 +141,50 @@ class MonitorServer:
     concurrency.
     """
 
-    __slots__ = ("_shim", "_sock", "_running", "_lock")
+    __slots__ = (
+        "_shim",
+        "_sock",
+        "_running",
+        "_lock",
+        "_max_line_bytes",
+        "_idle_timeout",
+        "_slots",
+    )
 
     def __init__(
-        self, shim: AgentShim, host: str = "127.0.0.1", port: int = 0
+        self,
+        shim: AgentShim,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        *,
+        max_line_bytes: int = DEFAULT_MAX_LINE_BYTES,
+        idle_timeout: float | None = DEFAULT_IDLE_TIMEOUT,
+        max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        backlog: int = 64,
     ) -> None:
+        """`max_line_bytes`, `idle_timeout`, and `max_connections` bound what
+        a hostile peer can consume; see this module's docstring. Each may be
+        tuned, and `idle_timeout=None` disables the timeout, but the byte and
+        connection limits have no "unlimited" setting on purpose -- an
+        unbounded read on an agent-facing socket is the defect, not a mode."""
         if not isinstance(shim, AgentShim):
             raise ServerError(f"expected an AgentShim, got {type(shim).__name__}")
+        if not isinstance(max_line_bytes, int) or max_line_bytes < 1:
+            raise ServerError("max_line_bytes must be a positive integer")
+        if not isinstance(max_connections, int) or max_connections < 1:
+            raise ServerError("max_connections must be a positive integer")
+        if idle_timeout is not None and (
+            not isinstance(idle_timeout, (int, float)) or idle_timeout <= 0
+        ):
+            raise ServerError("idle_timeout must be a positive number, or None")
         self._shim = shim
+        self._max_line_bytes = max_line_bytes
+        self._idle_timeout = None if idle_timeout is None else float(idle_timeout)
+        self._slots = threading.BoundedSemaphore(max_connections)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind((host, port))
-        self._sock.listen(5)
+        self._sock.listen(backlog)
         self._running = False
         self._lock = threading.Lock()
 
@@ -125,15 +207,32 @@ class MonitorServer:
                 conn, _addr = self._sock.accept()
             except OSError:
                 break  # the listening socket was closed by stop()
+            if not self._slots.acquire(blocking=False):
+                # At the connection cap. Refuse honestly and cheaply: `ok:
+                # false` says the monitor was never consulted (SPEC.md section
+                # 11.2), which is exactly true, and costs no thread.
+                self._refuse(conn, "monitor is at its connection limit")
+                continue
             threading.Thread(
                 target=self._run_connection, args=(conn,), daemon=True
             ).start()
+
+    def _refuse(self, conn: socket.socket, reason: str) -> None:
+        """Send one protocol-level refusal and close. Best effort: a peer that
+        is already gone is not an error worth propagating."""
+        try:
+            conn.sendall(_encode_line({"ok": False, "error": reason}))
+        except OSError:
+            pass
+        finally:
+            conn.close()
 
     def _run_connection(self, conn: socket.socket) -> None:
         try:
             self._handle_connection(conn)
         finally:
             conn.close()
+            self._slots.release()
 
     def stop(self) -> None:
         self._running = False
@@ -145,14 +244,32 @@ class MonitorServer:
     # --- connection handling ---
 
     def _handle_connection(self, conn: socket.socket) -> None:
+        if self._idle_timeout is not None:
+            conn.settimeout(self._idle_timeout)
         reader = conn.makefile("rb")
+        limit = self._max_line_bytes
         while True:
             try:
-                line = reader.readline()
+                # Read one byte past the limit so an over-length line is
+                # DISTINGUISHABLE from one that exactly fills it. `TimeoutError`
+                # (a socket timeout) is an OSError, so a stalled peer lands here
+                # and the connection is dropped.
+                line = reader.readline(limit + 1)
             except OSError:
                 return
             if not line:
                 return  # client closed its end
+            if len(line) > limit:
+                # Framing is already broken -- the rest of this line is still
+                # in the stream and there is no safe point to resume from.
+                # Answer once, then drop the connection.
+                self._refuse(
+                    conn,
+                    f"malformed request: line exceeds {limit} bytes",
+                )
+                return
+            if not line.endswith(b"\n"):
+                return  # EOF mid-line: an incomplete request is not a request
             response = self._handle_request(line)
             try:
                 conn.sendall(_encode_line(response))
