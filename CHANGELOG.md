@@ -68,6 +68,21 @@ has to satisfy, and it is recorded here rather than folded silently into
   §3.4's obligation was being met for 0.2 policies only. Both the generator
   and the reference checker now handle all four; the implementation and the
   checker agree across them.
+- **§3.4 is now also checked by exhaustive enumeration, not only by
+  sampling** (`tests/test_exhaustive.py`). Hypothesis-based property tests
+  finding zero counterexamples across a few hundred random draws is
+  evidence, not proof. This file constructs every policy in a small fixed
+  grid (all four counter-mode combinations crossed with every per-verb
+  clause shape) and replays every trace up to length 3 over a small
+  alphabet — not a sample of either — comparing the automaton's decision
+  against the same independent reference checker at every prefix of every
+  trace. ~1.8 million (policy, trace-prefix) comparisons, ~25s, zero
+  disagreements. The bounds (|V|=2, |T|=2, amounts and cap bounds in
+  {0,1,2}, trace length ≤3) are stated in the module docstring along with
+  what is deliberately not covered (a counter over a proper verb subset;
+  hostile-typed input, both already exercised by the sampled suite) —
+  widening any bound is a one-line change, not attempted by default because
+  CI wall-clock is a cost this repository should not spend silently.
 - **Packaging and CI.** `pyproject.toml` (zero runtime dependencies, the
   standard-library-only claim expressed in metadata), `py.typed` markers, and
   a workflow running the suite on 3.11–3.13 across Linux and Windows, plus a

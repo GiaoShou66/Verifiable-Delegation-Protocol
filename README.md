@@ -126,7 +126,12 @@ tests/      test_policy.py  test_monitor.py  test_tokens.py  test_runtime.py
 gives a second implementation — so this implementation is held to its own
 published artifacts. `test_hardening.py` covers what a hostile peer or a
 crash reaches: request-line bounds, connection timeouts and caps, and that a
-record is on disk before `append()` returns.
+record is on disk before `append()` returns. `test_exhaustive.py` checks the
+SPEC.md §3.4 correctness obligation by enumeration rather than sampling: over
+a small fixed alphabet it constructs every policy in a grid covering all four
+counter-mode combinations and replays every trace up to length 3, comparing
+the automaton's decision against an independent reference checker at every
+step (~1.8 million comparisons, ~25s).
 
 ## Documentation
 
