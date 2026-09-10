@@ -26,8 +26,11 @@ if "%BRANCH%"=="" (
 
 set MSG=%~1
 if "%MSG%"=="" (
-    for /f "tokens=1-3 delims=/ " %%a in ("%date%") do set DATESTAMP=%%a-%%b-%%c
-    set MSG=Update !DATESTAMP! %time:~0,8%
+    rem %date% / %time% are used raw, not parsed -- their field order depends
+    rem on Windows locale (this system emits a weekday-first CJK format), so
+    rem slicing by position silently produced garbage on this machine. Raw is
+    rem fine here: it is only a label, never compared or read back.
+    set MSG=Update %date% %time:~0,8%
 )
 
 git add -A
