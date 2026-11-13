@@ -52,11 +52,116 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping, Protocol
 
 from monitor.automaton import BAD, Automaton, Symbol
 
-__all__ = ["AuditLog", "AuditLogError", "Record", "VerificationResult", "genesis_hash"]
+__all__ = [
+    "AbstractAnchorPublisher",
+    "AuditLog",
+    "AuditLogError",
+    "FileAnchorPublisher",
+    "HttpAnchorPublisher",
+    "Record",
+    "VerificationResult",
+    "genesis_hash",
+]
+
+
+class AbstractAnchorPublisher(Protocol):
+    """External anchoring interface to eliminate tail-truncation gaps."""
+
+    def publish(self, seq: int, head_hash: str, policy_hash: str) -> None:
+        """Publish the current chain head to an external immutable destination."""
+        ...
+
+
+class FileAnchorPublisher:
+    """Publishes audit log heads to an out-of-band append-only anchor file.
+
+    Enables external verification to detect tail truncation.
+    """
+
+    __slots__ = ("_path", "_fsync")
+
+    def __init__(self, path: str | Path, *, fsync: bool = True) -> None:
+        self._path = Path(path)
+        self._fsync = fsync
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def publish(self, seq: int, head_hash: str, policy_hash: str) -> None:
+        record = {
+            "seq": seq,
+            "head": head_hash,
+            "policy_hash": policy_hash,
+        }
+        line = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+        with open(self._path, "a", encoding="ascii") as f:
+            f.write(line)
+            f.flush()
+            if self._fsync:
+                os.fsync(f.fileno())
+
+    def latest_anchor(self) -> dict | None:
+        """Reads the latest published anchor record, or None if file doesn't exist/empty."""
+        if not self._path.exists():
+            return None
+        with open(self._path, "r", encoding="ascii") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+        if not lines:
+            return None
+        return json.loads(lines[-1])
+
+    def verify_log(self, log: "AuditLog") -> tuple[bool, str]:
+        """Detect tail truncation by comparing the audit log's head with the anchor."""
+        latest = self.latest_anchor()
+        if latest is None:
+            if log.head == genesis_hash(log.policy_hash):
+                return True, "log and anchor are both empty"
+            return False, "log has records but no external anchor was published"
+
+        if log.policy_hash != latest["policy_hash"]:
+            return False, f"policy_hash mismatch between log ({log.policy_hash}) and anchor ({latest['policy_hash']})"
+
+        if log.head != latest["head"]:
+            return False, f"tail truncation detected: log head {log.head} != anchor head {latest['head']}"
+
+        return True, f"log head matches external anchor at seq {latest['seq']}"
+
+
+class HttpAnchorPublisher:
+    """Publishes audit log heads to an external HTTP webhook / immutable ledger."""
+
+    __slots__ = ("_url", "_timeout", "_headers")
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        timeout: float = 5.0,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        self._url = url
+        self._timeout = timeout
+        self._headers = dict(headers or {})
+
+    def publish(self, seq: int, head_hash: str, policy_hash: str) -> None:
+        import urllib.request
+        payload = json.dumps({
+            "seq": seq,
+            "head": head_hash,
+            "policy_hash": policy_hash,
+        }, separators=(",", ":")).encode("utf-8")
+        headers = {"Content-Type": "application/json", **self._headers}
+        req = urllib.request.Request(self._url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout):
+                pass
+        except Exception as exc:
+            raise AuditLogError(f"failed to publish anchor to {self._url}: {exc}") from exc
 
 
 class AuditLogError(ValueError):
@@ -283,6 +388,7 @@ class AuditLog:
         "_last_hash",
         "_seq",
         "_on_append",
+        "_anchor_publisher",
         "_fsync",
     )
 
@@ -293,6 +399,7 @@ class AuditLog:
         log_key: bytes,
         *,
         on_append: "Callable[[str], None] | None" = None,
+        anchor_publisher: "AbstractAnchorPublisher | None" = None,
         fsync: bool = True,
     ) -> None:
         """
@@ -330,6 +437,7 @@ class AuditLog:
         self._last_hash = genesis_hash(policy_hash)
         self._seq = 0
         self._on_append = on_append
+        self._anchor_publisher = anchor_publisher
         self._fsync = bool(fsync)
 
         # Resume an existing log rather than overwriting it: opening for write
@@ -353,6 +461,10 @@ class AuditLog:
     @property
     def policy_hash(self) -> str:
         return self._policy_hash
+
+    @property
+    def seq(self) -> int:
+        return self._seq
 
     @property
     def head(self) -> str:
@@ -423,6 +535,8 @@ class AuditLog:
 
         self._last_hash = digest
         self._seq += 1
+        if self._anchor_publisher is not None:
+            self._anchor_publisher.publish(record.seq, digest, self._policy_hash)
         if self._on_append is not None:
             self._on_append(digest)
         return record

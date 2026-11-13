@@ -238,16 +238,15 @@ class AgentShim:
         executor: Callable[[str, Mapping], object] | None = None,
         *,
         expected_artifact_hash: str | None = None,
+        require_artifact_hash: bool = False,
+        allow_unpinned_tools: bool = True,
     ) -> None:
         """
-        `expected_artifact_hash`: optional. If given, construction FAILS
+        `expected_artifact_hash`: Binds the tool table to its confirmed state.
+        When provided (or when `require_artifact_hash=True`), construction FAILS
         unless it equals `artifact_hash(monitor.policy.digest(), tools)` --
-        the same check the log's own policy_hash gets (`log.policy_hash !=
-        monitor.policy.digest()` below), but for the tool table. Omit it (the
-        default) to skip this check entirely; existing callers that never
-        pass it are unaffected. Passing it is how an integrator makes "the
-        table wired into this shim is the exact one shown at confirmation" a
-        checked fact instead of an assumption.
+        protecting against tool argument poisoning where argument names or
+        units are altered in the tool table.
         """
         if not isinstance(monitor, Monitor):
             raise ShimError(f"expected a Monitor, got {type(monitor).__name__}")
@@ -270,6 +269,11 @@ class AgentShim:
             table[name] = spec
 
         computed_artifact_hash = artifact_hash(monitor.policy.digest(), table)
+        if expected_artifact_hash is None and (require_artifact_hash or not allow_unpinned_tools):
+            raise ShimError(
+                "expected_artifact_hash is mandatory in production to prevent tool table poisoning; "
+                "pass artifact_hash(monitor.policy.digest(), tools)."
+            )
         if (
             expected_artifact_hash is not None
             and expected_artifact_hash != computed_artifact_hash
@@ -396,7 +400,16 @@ class AgentShim:
         error: str | None = None
         try:
             if self._executor is not None:
-                result = self._executor(tool_name, dict(action.attrs))
+                try:
+                    result = self._executor(
+                        tool_name,
+                        dict(action.attrs),
+                        token_id=token_id,
+                        seq=self._log.seq,
+                        action=action,
+                    )
+                except TypeError:
+                    result = self._executor(tool_name, dict(action.attrs))
         except Exception as exc:  # the executor is outside the TCB
             error = f"{type(exc).__name__}: {exc}"
 

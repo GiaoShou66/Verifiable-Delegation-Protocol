@@ -219,20 +219,21 @@ class Token:
         return Token.from_obj(parsed)
 
 
-def mint(key: bytes, root: Scope, policy_hash: str = "") -> Token:
+def mint(
+    key: bytes,
+    root: Scope,
+    policy_hash: str = "",
+    *,
+    allow_unbound: bool = True,
+    require_bound: bool = False,
+) -> Token:
     """Issue a root token. The ONLY function here that needs `k`.
 
     Called by the issuer after the human confirmation gate, never by an agent.
 
-    `policy_hash`: optional, and the default is the WEAKER of the two paths.
-    "" (default) mints an unbound token, exactly as before this parameter
-    existed -- the default is backward compatibility, not a recommendation.
-    Passing `policy.digest()` binds this root token's tag to that specific
-    policy artifact (Token.policy_hash), closing the gap where two
-    structurally-identical root scopes minted under different policies verify
-    interchangeably (SPEC.md section 5.1a). A deployment should pass it and
-    have the verifier require it; SECURITY.md's deployment checklist lists
-    this first for that reason.
+    `policy_hash`: In production, root tokens should be cryptographically bound
+    to a policy artifact digest (`policy.digest()`). Passing `allow_unbound=False`
+    or `require_bound=True` enforces non-empty `policy_hash`.
     """
     key_bytes = _check_key(key)
     if not isinstance(root, Scope):
@@ -240,6 +241,11 @@ def mint(key: bytes, root: Scope, policy_hash: str = "") -> Token:
     if not isinstance(policy_hash, str):
         raise TokenError(
             f"policy_hash must be a string, got {type(policy_hash).__name__}"
+        )
+    if (require_bound or not allow_unbound) and not policy_hash:
+        raise TokenError(
+            "policy_hash is required and cannot be empty: root tokens must be "
+            "cryptographically bound to a policy artifact (pass policy.digest())."
         )
     return Token(
         root=root,

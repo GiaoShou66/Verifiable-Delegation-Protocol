@@ -84,10 +84,13 @@ which by SPEC.md section 7 the agent never is.
 
 from __future__ import annotations
 
+import hmac
 import json
+import os
 import socket
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Mapping
 
 from runtime.shim import AgentShim
@@ -172,6 +175,8 @@ class MonitorServer:
         "_idle_timeout",
         "_slots",
         "_clock",
+        "_socket_path",
+        "_transport_token",
     )
 
     def __init__(
@@ -180,6 +185,8 @@ class MonitorServer:
         host: str = "127.0.0.1",
         port: int = 0,
         *,
+        socket_path: str | Path | None = None,
+        transport_token: str | None = None,
         max_line_bytes: int = DEFAULT_MAX_LINE_BYTES,
         idle_timeout: float | None = DEFAULT_IDLE_TIMEOUT,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
@@ -191,6 +198,14 @@ class MonitorServer:
         tuned, and `idle_timeout=None` disables the timeout, but the byte and
         connection limits have no "unlimited" setting on purpose -- an
         unbounded read on an agent-facing socket is the defect, not a mode.
+
+        `socket_path`: optional Path/str for a Unix Domain Socket (UDS). When
+        provided, binds to the UDS and sets file permissions to 0600 (read/write
+        by owner only) on platforms that support POSIX permissions.
+
+        `transport_token`: optional shared secret for peer authentication. When
+        configured, connecting peers must authenticate before any call or
+        remaining request is processed.
 
         `clock`: the source of `now` for token expiry (SPEC.md section 5.1).
         Defaults to this server's own `time.time`, which is the only setting
@@ -210,22 +225,46 @@ class MonitorServer:
             not isinstance(idle_timeout, (int, float)) or idle_timeout <= 0
         ):
             raise ServerError("idle_timeout must be a positive number, or None")
+        if transport_token is not None and not isinstance(transport_token, str):
+            raise ServerError("transport_token must be a string, or None")
+
         self._shim = shim
         self._max_line_bytes = max_line_bytes
         self._idle_timeout = None if idle_timeout is None else float(idle_timeout)
         self._slots = threading.BoundedSemaphore(max_connections)
         self._clock = clock
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind((host, port))
+        self._socket_path = Path(socket_path) if socket_path is not None else None
+        self._transport_token = transport_token
+
+        if self._socket_path is not None:
+            if not hasattr(socket, "AF_UNIX"):
+                raise ServerError("Unix domain sockets (AF_UNIX) are not supported on this platform")
+            # If socket file already exists, clean up stale socket
+            if self._socket_path.exists():
+                try:
+                    os.unlink(self._socket_path)
+                except OSError:
+                    pass
+            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._sock.bind(str(self._socket_path))
+            try:
+                os.chmod(self._socket_path, 0o600)
+            except OSError:
+                pass
+        else:
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._sock.bind((host, port))
+
         self._sock.listen(backlog)
         self._running = False
         self._lock = threading.Lock()
 
     @property
-    def address(self) -> tuple[str, int]:
-        """The bound (host, port) -- useful when `port=0` asked for an
-        ephemeral one, e.g. in tests."""
+    def address(self) -> tuple[str, int] | str:
+        """The bound (host, port) or UDS socket path."""
+        if self._socket_path is not None:
+            return str(self._socket_path)
         return self._sock.getsockname()[:2]
 
     def serve_forever(self) -> None:
@@ -284,6 +323,11 @@ class MonitorServer:
             self._sock.close()
         except OSError:
             pass
+        if self._socket_path is not None:
+            try:
+                os.unlink(self._socket_path)
+            except OSError:
+                pass
 
     # --- connection handling ---
 
@@ -292,6 +336,8 @@ class MonitorServer:
             conn.settimeout(self._idle_timeout)
         reader = conn.makefile("rb")
         limit = self._max_line_bytes
+        authenticated = self._transport_token is None
+
         while True:
             try:
                 # Read one byte past the limit so an over-length line is
@@ -314,30 +360,47 @@ class MonitorServer:
                 return
             if not line.endswith(b"\n"):
                 return  # EOF mid-line: an incomplete request is not a request
-            response = self._handle_request(line)
+
+            response, authenticated = self._handle_request(line, authenticated)
             try:
                 conn.sendall(_encode_line(response))
             except OSError:
                 return
 
-    def _handle_request(self, line: bytes) -> dict:
+    def _handle_request(self, line: bytes, authenticated: bool) -> tuple[dict, bool]:
         try:
             req = json.loads(line.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            return {"ok": False, "error": f"malformed request: not valid JSON ({exc})"}
+            return {"ok": False, "error": f"malformed request: not valid JSON ({exc})"}, authenticated
         if not isinstance(req, dict):
             return {
                 "ok": False,
                 "error": f"malformed request: expected an object, got {type(req).__name__}",
-            }
+            }, authenticated
+
+        # Handle transport peer authentication
+        if self._transport_token is not None:
+            # Check for per-request token or auth handshake
+            client_token = req.get("transport_token")
+            if req.get("op") == "auth":
+                provided = req.get("token")
+                if isinstance(provided, str) and hmac.compare_digest(provided, self._transport_token):
+                    return {"ok": True, "authenticated": True}, True
+                return {"ok": False, "error": "unauthorized: invalid transport_token"}, False
+
+            if not authenticated:
+                if isinstance(client_token, str) and hmac.compare_digest(client_token, self._transport_token):
+                    authenticated = True
+                else:
+                    return {"ok": False, "error": "unauthorized: connection not authenticated; missing or invalid transport_token"}, False
 
         op = req.get("op")
         if op == "call":
-            return self._handle_call(req)
+            return self._handle_call(req), authenticated
         if op == "remaining":
             with self._lock:
-                return {"ok": True, "remaining": self._shim.remaining()}
-        return {"ok": False, "error": f"unknown op {op!r}"}
+                return {"ok": True, "remaining": self._shim.remaining()}, authenticated
+        return {"ok": False, "error": f"unknown op {op!r}"}, authenticated
 
     def _handle_call(self, req: dict) -> dict:
         tool_name = req.get("tool_name")

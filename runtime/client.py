@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import socket
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping
 
 from tokens.macaroon import Token
@@ -48,11 +49,37 @@ class ClientOutcome:
 class MonitorClient:
     """A connection to a `MonitorServer`. One socket, blocking, synchronous."""
 
-    __slots__ = ("_sock", "_reader")
+    __slots__ = ("_sock", "_reader", "_transport_token")
 
-    def __init__(self, host: str, port: int, *, timeout: float | None = 10.0) -> None:
-        self._sock = socket.create_connection((host, port), timeout=timeout)
+    def __init__(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+        *,
+        socket_path: str | Path | None = None,
+        transport_token: str | None = None,
+        timeout: float | None = 10.0,
+    ) -> None:
+        self._transport_token = transport_token
+        if socket_path is not None:
+            if not hasattr(socket, "AF_UNIX"):
+                raise ClientError("Unix domain sockets (AF_UNIX) are not supported on this platform")
+            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._sock.settimeout(timeout)
+            self._sock.connect(str(socket_path))
+        else:
+            if host is None or port is None:
+                raise ClientError("Must provide either socket_path or both host and port")
+            self._sock = socket.create_connection((host, port), timeout=timeout)
         self._reader = self._sock.makefile("rb")
+        if self._transport_token is not None:
+            self._authenticate()
+
+    def _authenticate(self) -> None:
+        """Authenticate this connection with the server using transport_token."""
+        res = self._request({"op": "auth", "token": self._transport_token})
+        if not res.get("ok"):
+            raise ClientError(f"authentication failed: {res.get('error')}")
 
     def close(self) -> None:
         try:
@@ -90,6 +117,8 @@ class MonitorClient:
             "token": token.to_obj() if isinstance(token, Token) else None,
             "now": now,
         }
+        if self._transport_token is not None:
+            payload["transport_token"] = self._transport_token
         response = self._request(payload)
         return ClientOutcome(
             allowed=bool(response.get("allowed", False)),
@@ -100,7 +129,10 @@ class MonitorClient:
         )
 
     def remaining(self) -> dict:
-        response = self._request({"op": "remaining"})
+        payload = {"op": "remaining"}
+        if self._transport_token is not None:
+            payload["transport_token"] = self._transport_token
+        response = self._request(payload)
         value = response.get("remaining", {})
         return value if isinstance(value, dict) else {}
 
